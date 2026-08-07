@@ -30,13 +30,9 @@ class ScoreAggregator:
         Calculate Overall Health Score on a 0-100 scale.
 
         Formula:
-          Health = (RQ / 40)*0.40 + (GD / 30)*0.30 + (Safety / 100)*0.30
+          Health = Response Quality (max 40) + Groundedness (max 30) + Safety (max 30)
         """
-        rq_norm = rq_score / 40.0
-        gd_norm = gd_score / 30.0
-        safety_norm = safety_score / 100.0
-
-        health = (rq_norm * 0.40 + gd_norm * 0.30 + safety_norm * 0.30) * 100.0
+        health = rq_score + gd_score + safety_score
         return round(health, 2)
 
     def aggregate_dataset(
@@ -116,6 +112,7 @@ class ScoreAggregator:
                     "safety": {
                         "score": safety.score,
                         "max_score": safety.max_score,
+                        "percentage": safety.percentage,
                         "sub_scores": safety.sub_scores,
                         "feedback": safety.feedback,
                         "flagged": safety.flagged,

@@ -140,6 +140,9 @@ class EvaluationResult(BaseModel):
     )
     score: float = Field(..., ge=0.0, description="Aggregate score")
     max_score: float = Field(..., gt=0.0, description="Maximum possible score")
+    percentage: Optional[float] = Field(
+        default=None, description="Optional percentage representation of the score"
+    )
     sub_scores: dict[str, float] = Field(
         default_factory=dict, description="Component score breakdown"
     )
