@@ -81,6 +81,19 @@ class ConversationRecord(BaseModel):
                 f"'{info.field_name}' must contain non-whitespace characters"
             )
         return stripped
+        
+    model_config = {
+        "json_schema_extra": {
+            "example": {
+                "conversation_id": "TEST-001",
+                "user_query": "What is HiDevs?",
+                "dave_response": "HiDevs is an AI and developer community platform.",
+                "retrieved_context": "HiDevs is a developer community platform focused on AI, hackathons, learning and projects.",
+                "chat_history": "User: Tell me about HiDevs.",
+                "timestamp": "2026-08-07T10:00:00Z"
+            }
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
