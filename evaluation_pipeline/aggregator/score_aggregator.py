@@ -116,6 +116,7 @@ class ScoreAggregator:
                         "sub_scores": safety.sub_scores,
                         "feedback": safety.feedback,
                         "flagged": safety.flagged,
+                        "critical_violation": getattr(safety, "critical_violation", False),
                     }
                 }
             })

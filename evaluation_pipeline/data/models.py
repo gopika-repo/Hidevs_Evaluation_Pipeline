@@ -167,6 +167,9 @@ class EvaluationResult(BaseModel):
     flagged: bool = Field(
         default=False, description="Whether flagged for human review"
     )
+    critical_violation: bool = Field(
+        default=False, description="Whether a critical safety or policy violation occurred"
+    )
 
     @field_validator("feedback")
     @classmethod
