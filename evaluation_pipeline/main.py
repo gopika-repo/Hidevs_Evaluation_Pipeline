@@ -4,6 +4,7 @@ Dave Evaluation Pipeline — Main Entry Point
 Phase 0A: Loads mock conversations, validates them, tags them.
 Phase 0B: Runs Response Quality and Groundedness evaluators with real
           LLM judge calls against all conversations.
+Phase 1:  Rescaled scoring (RQ=20, GD=15, Safety=15, max=50).
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def main() -> None:
     """Run the full Phase 0A + 0B + 0C pipeline."""
 
     logger.info("=" * 70)
-    logger.info("Dave Evaluation Pipeline — Phase 0C")
+    logger.info("Dave Evaluation Pipeline — Phase 1")
     logger.info("=" * 70)
 
     # ------------------------------------------------------------------
@@ -134,6 +135,27 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
+    # 5.5. Run Intent Understanding Evaluator (Phase 1B)
+    # ------------------------------------------------------------------
+    from evaluation_pipeline.evaluators.intent_evaluator import (
+        IntentEvaluator,
+    )
+
+    logger.info("-" * 70)
+    logger.info("PHASE 1B — Running Intent Understanding Evaluator")
+    logger.info("-" * 70)
+
+    intent_evaluator = IntentEvaluator()
+    intent_start = time.time()
+    intent_results = intent_evaluator.evaluate_batch(evaluation_inputs)
+    intent_elapsed = time.time() - intent_start
+    logger.info(
+        "Intent evaluation complete: %d results in %.1fs",
+        len(intent_results),
+        intent_elapsed,
+    )
+
+    # ------------------------------------------------------------------
     # 6. Aggregate Scores (Phase 0C)
     # ------------------------------------------------------------------
     from evaluation_pipeline.aggregator.score_aggregator import (
@@ -149,7 +171,8 @@ def main() -> None:
         evaluation_inputs,
         rq_results,
         gd_results,
-        safety_results
+        safety_results,
+        intent_results,
     )
 
     # ------------------------------------------------------------------
@@ -170,10 +193,11 @@ def main() -> None:
     # 8. Print results tables
     # ------------------------------------------------------------------
     print("\n")
-    _print_results_table("RESPONSE QUALITY RESULTS (max=40)", rq_results)
-    _print_results_table("GROUNDEDNESS RESULTS (max=30)", gd_results)
-    _print_results_table("SAFETY RESULTS (max=100)", safety_results)
-    _print_health_table("OVERALL HEALTH SUMMARY (0-100 scale)", aggregated_data["conversations"])
+    _print_results_table("RESPONSE QUALITY RESULTS (max=20)", rq_results)
+    _print_results_table("GROUNDEDNESS RESULTS (max=15)", gd_results)
+    _print_results_table("SAFETY RESULTS (max=15)", safety_results)
+    _print_results_table("INTENT UNDERSTANDING RESULTS (max=15)", intent_results)
+    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-65 scale)", aggregated_data["conversations"])
 
     # ------------------------------------------------------------------
     # 9. Detailed feedback inspection (3+ samples)
@@ -183,17 +207,18 @@ def main() -> None:
         rq_results,
         gd_results,
         safety_results,
+        intent_results,
         aggregated_data["conversations"]
     )
 
     # ------------------------------------------------------------------
     # 10. Summary statistics
     # ------------------------------------------------------------------
-    _print_summary_stats(rq_results, gd_results, safety_results, aggregated_data)
+    _print_summary_stats(rq_results, gd_results, safety_results, intent_results, aggregated_data)
 
-    total_elapsed = rq_elapsed + gd_elapsed + safety_elapsed
+    total_elapsed = rq_elapsed + gd_elapsed + safety_elapsed + intent_elapsed
     logger.info(
-        "Phase 0C complete. Total evaluation time: %.1fs", total_elapsed
+        "Phase 1 complete. Total evaluation time: %.1fs", total_elapsed
     )
 
 
@@ -269,6 +294,7 @@ def _print_detailed_inspection(
     rq_results: list,
     gd_results: list,
     safety_results: list,
+    intent_results: list,
     records: list,
 ) -> None:
     """
@@ -286,6 +312,7 @@ def _print_detailed_inspection(
     rq_by_id = {r.conversation_id: r for r in rq_results}
     gd_by_id = {r.conversation_id: r for r in gd_results}
     safety_by_id = {r.conversation_id: r for r in safety_results}
+    intent_by_id = {r.conversation_id: r for r in intent_results}
     record_by_id = {r["conversation_id"]: r for r in records}
 
     print("=" * 90)
@@ -326,6 +353,13 @@ def _print_detailed_inspection(
         for line in safety.feedback.split("\n"):
             print(f"  {line}")
 
+        intent = intent_by_id.get(conv_id)
+        if intent:
+            print(f"\n  -- Intent Understanding ({intent.score}/{intent.max_score}) "
+                  f"{'! FLAGGED' if intent.flagged else ''} --")
+            for line in intent.feedback.split("\n"):
+                print(f"  {line}")
+
     print()
 
 
@@ -333,6 +367,7 @@ def _print_summary_stats(
     rq_results: list,
     gd_results: list,
     safety_results: list,
+    intent_results: list,
     aggregated_data: dict,
 ) -> None:
     """Print aggregate statistics across all evaluations."""
@@ -346,27 +381,17 @@ def _print_summary_stats(
     print(f"  Total conversations:  {stats['total_conversations']}")
     print(f"  Flagged:              {stats['flagged_conversations']}")
     print(f"  Averages:")
-    print(f"    Response Quality:   {averages['response_quality']:.2f} / 40.00")
-    print(f"    Groundedness:       {averages['groundedness']:.2f} / 30.00")
-    print(f"    Safety:             {averages['safety']:.2f} / 100.00")
-    print(f"    Overall Health:     {averages['overall_health']:.2f} / 100.00")
+    print(f"    Response Quality:   {averages['response_quality']:.2f} / 20.00")
+    print(f"    Groundedness:       {averages['groundedness']:.2f} / 15.00")
+    print(f"    Safety:             {averages['safety']:.2f} / 15.00")
+    if "intent_understanding" in averages:
+        print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 15.00")
+    print(f"    Overall Health:     {averages['overall_health']:.2f} / 65.00  (Phase 1 scope)")
     print(f"  Groundedness Breakdown:")
     print(f"    Context-backed avg: {breakdown['context_backed_average']:.2f} (count: {breakdown['context_backed_count']})")
     print(f"    Context-free avg:   {breakdown['context_free_average']:.2f} (count: {breakdown['context_free_count']})")
     print("=" * 70 + "\n")
 
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    main()
-
-
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
     main()

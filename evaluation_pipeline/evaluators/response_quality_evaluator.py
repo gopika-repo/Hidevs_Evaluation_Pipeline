@@ -1,5 +1,5 @@
 """
-Response Quality Evaluator — Phase 0B
+Response Quality Evaluator — Phase 1
 
 Evaluates Dave's response quality via an LLM judge on four metrics:
   • Correctness  — factual accuracy
@@ -8,9 +8,9 @@ Evaluates Dave's response quality via an LLM judge on four metrics:
   • Completeness — coverage of the question's scope
 
 Each metric is scored 1–5, then converted:
-    Metric Contribution = (score / 5) * 10
+    Metric Contribution = (score / 5) * 5
 
-Final score = sum of all 4 contributions (max = 40).
+Final score = sum of all 4 contributions (max = 20).
 
 The LLM judge is instructed to be strict, return structured JSON with
 per-metric reasoning, and avoid generous scoring.
@@ -36,8 +36,8 @@ logger = logging.getLogger(__name__)
 
 _METRICS = ("correctness", "helpfulness", "clarity", "completeness")
 _MAX_METRIC_SCORE = 5
-_METRIC_WEIGHT = 10  # each contributes up to 10 points
-_MAX_TOTAL = len(_METRICS) * _METRIC_WEIGHT  # 40
+_METRIC_WEIGHT = 5  # each contributes up to 5 points (Phase 1: halved from 10)
+_MAX_TOTAL = len(_METRICS) * _METRIC_WEIGHT  # 20
 
 _SYSTEM_PROMPT = """\
 You are a STRICT, expert evaluation judge assessing AI assistant responses.
@@ -112,7 +112,7 @@ class ResponseQualityEvaluator(BaseEvaluator):
     """
     LLM-as-judge evaluator for response quality.
 
-    Scores 4 metrics × 10 points each = 40 max.
+    Scores 4 metrics × 5 points each = 20 max.
     """
 
     name: str = "response_quality"
@@ -141,7 +141,7 @@ class ResponseQualityEvaluator(BaseEvaluator):
         # 2. Validate and extract metric scores
         metric_scores = self._extract_metric_scores(parsed_json)
 
-        # 3. Compute sub-scores: (raw_score / 5) * 10
+        # 3. Compute sub-scores: (raw_score / 5) * 5
         sub_scores: dict[str, float] = {}
         for metric in _METRICS:
             raw = metric_scores[metric]["score"]

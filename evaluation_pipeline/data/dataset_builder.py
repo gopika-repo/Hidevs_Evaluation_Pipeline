@@ -107,6 +107,11 @@ class DatasetBuilder:
             if record.chat_history
             else None
         )
+        expected_intent = (
+            self._normalize_text(record.expected_intent)
+            if record.expected_intent
+            else None
+        )
 
         # Auto-tag conversation type
         conversation_type = self._classify(retrieved_context)
@@ -123,6 +128,7 @@ class DatasetBuilder:
             dave_response=dave_response,
             retrieved_context=retrieved_context,
             chat_history=chat_history,
+            expected_intent=expected_intent,
             timestamp=record.timestamp,
             conversation_type=conversation_type,
         )

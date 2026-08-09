@@ -1,21 +1,21 @@
 """
-Groundedness / Hallucination Evaluator — Phase 0B
+Groundedness / Hallucination Evaluator — Phase 1
 
 Evaluates whether Dave's response is grounded in evidence and free of
 fabricated claims. Branches logic based on conversation type:
 
-**Context-Backed** (max = 30):
-  • Evidence Coverage       — (supported / total claims) × 10
-  • Faithfulness to Context — (faithfulness_score / 5) × 10
-  • Unsupported Claims      — (1 − unsupported / total) × 5
-  • Contradiction Detection — (1 − contradictions / total) × 5
+**Context-Backed** (max = 15):
+  • Evidence Coverage       — (supported / total claims) × 5
+  • Faithfulness to Context — (faithfulness_score / 5) × 5
+  • Unsupported Claims      — (1 − unsupported / total) × 2.5
+  • Contradiction Detection — (1 − contradictions / total) × 2.5
   + TruLens groundedness score (stored for comparison, not averaged in)
   + DeepEval faithfulness score (stored for comparison, not averaged in)
 
-**Context-Free** (max = 30):
-  • Internal Consistency  — (consistency_score / 5) × 10
-  • Overconfidence        — (overconfidence_score / 5) × 10
-  • Hallucination Risk    — (hallucination_score / 5) × 10
+**Context-Free** (max = 15):
+  • Internal Consistency  — (consistency_score / 5) × 5
+  • Overconfidence        — (overconfidence_score / 5) × 5
+  • Hallucination Risk    — (hallucination_score / 5) × 5
 """
 
 from __future__ import annotations
@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_SCORE_CONTEXT_BACKED = 30.0
-_MAX_SCORE_CONTEXT_FREE = 30.0
+_MAX_SCORE_CONTEXT_BACKED = 15.0  # Phase 1: halved from 30
+_MAX_SCORE_CONTEXT_FREE = 15.0    # Phase 1: halved from 30
 
 # ---------------------------------------------------------------------------
 # Prompts — Context-Backed
@@ -274,8 +274,8 @@ def _run_deepeval_faithfulness(
 class GroundednessEvaluator(BaseEvaluator):
     """
     Groundedness / hallucination evaluator with branching logic:
-      - Context-backed → claim extraction + faithfulness (max 30)
-      - Context-free   → consistency + overconfidence + hallucination risk (max 30)
+      - Context-backed → claim extraction + faithfulness (max 15)
+      - Context-free   → consistency + overconfidence + hallucination risk (max 15)
 
     Also runs TruLens and DeepEval in parallel for comparison (context-backed only).
     """
@@ -354,11 +354,11 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "faithfulness", default=3
         )
 
-        # Apply the exact formulas
-        evidence_coverage = (supported / total_claims) * 10
-        faithfulness_score = (faithfulness_raw / 5) * 10
-        unsupported_score = (1 - (unsupported / total_claims)) * 5
-        contradiction_score = (1 - (contradictions / total_claims)) * 5
+        # Apply the exact formulas (Phase 1: halved multipliers)
+        evidence_coverage = (supported / total_claims) * 5
+        faithfulness_score = (faithfulness_raw / 5) * 5
+        unsupported_score = (1 - (unsupported / total_claims)) * 2.5
+        contradiction_score = (1 - (contradictions / total_claims)) * 2.5
 
         sub_scores: dict[str, float] = {
             "evidence_coverage": round(evidence_coverage, 2),
@@ -459,10 +459,10 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Evidence Coverage={sub_scores.get('evidence_coverage', 0)}/10, "
-            f"Faithfulness={sub_scores.get('faithfulness_to_context', 0)}/10, "
-            f"Unsupported={sub_scores.get('unsupported_claims', 0)}/5, "
-            f"Contradictions={sub_scores.get('contradiction_detection', 0)}/5"
+            f"Sub-scores: Evidence Coverage={sub_scores.get('evidence_coverage', 0)}/5, "
+            f"Faithfulness={sub_scores.get('faithfulness_to_context', 0)}/5, "
+            f"Unsupported={sub_scores.get('unsupported_claims', 0)}/2.5, "
+            f"Contradictions={sub_scores.get('contradiction_detection', 0)}/2.5"
         )
 
         # External framework comparison
@@ -514,10 +514,10 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "hallucination_risk", default=3
         )
 
-        # Apply formulas: (score / 5) × 10
-        consistency_score = (consistency_raw / 5) * 10
-        overconfidence_score = (overconfidence_raw / 5) * 10
-        hallucination_score = (hallucination_raw / 5) * 10
+        # Apply formulas: (score / 5) × 5  (Phase 1: halved from ×10)
+        consistency_score = (consistency_raw / 5) * 5
+        overconfidence_score = (overconfidence_raw / 5) * 5
+        hallucination_score = (hallucination_raw / 5) * 5
 
         sub_scores: dict[str, float] = {
             "internal_consistency": round(consistency_score, 2),
@@ -573,9 +573,9 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/10, "
-            f"Overconfidence={sub_scores.get('overconfidence', 0)}/10, "
-            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/10"
+            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/5, "
+            f"Overconfidence={sub_scores.get('overconfidence', 0)}/5, "
+            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/5"
         )
 
         return "\n\n".join(parts) if parts else "No feedback generated."

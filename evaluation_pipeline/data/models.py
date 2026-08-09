@@ -68,6 +68,10 @@ class ConversationRecord(BaseModel):
     chat_history: Optional[str] = Field(
         default=None, description="Prior conversation turns"
     )
+    expected_intent: Optional[str] = Field(
+        default=None,
+        description="Ground-truth intent label for testing; None in production",
+    )
     timestamp: datetime = Field(
         ..., description="Conversation timestamp"
     )
@@ -90,7 +94,8 @@ class ConversationRecord(BaseModel):
                 "dave_response": "HiDevs is an AI and developer community platform.",
                 "retrieved_context": "HiDevs is a developer community platform focused on AI, hackathons, learning and projects.",
                 "chat_history": "User: Tell me about HiDevs.",
-                "timestamp": "2026-08-07T10:00:00Z"
+                "timestamp": "2026-08-07T10:00:00Z",
+                "expected_intent": "technical"
             }
         }
     }
@@ -112,6 +117,7 @@ class EvaluationInput(BaseModel):
     dave_response: str
     retrieved_context: Optional[str] = None
     chat_history: Optional[str] = None
+    expected_intent: Optional[str] = None
     timestamp: datetime
     conversation_type: ConversationType = Field(
         ..., description="Auto-tagged based on retrieved_context presence"

@@ -20,11 +20,12 @@ from evaluation_pipeline.data.models import ConversationRecord
 
 
 def get_mock_conversations() -> list[ConversationRecord]:
-    """Return the full set of 15 mock conversations."""
+    """Return the full set of mock conversations."""
     return (
         _context_backed_conversations()
         + _context_free_conversations()
         + _known_issue_conversations()
+        + _intent_test_conversations()
     )
 
 
@@ -500,5 +501,139 @@ def _known_issue_conversations() -> list[ConversationRecord]:
             ),
             chat_history=None,
             timestamp=datetime(2026, 7, 21, 14, 30, 0, tzinfo=timezone.utc),
+        ),
+    ]
+
+
+# =========================================================================
+# CATEGORY 4: Intent Test Conversations (8)
+# =========================================================================
+
+def _intent_test_conversations() -> list[ConversationRecord]:
+    return [
+        # IT-001: personal intent, correct response
+        ConversationRecord(
+            conversation_id="IT-001",
+            user_query="Have I completed my mandatory security awareness training?",
+            dave_response=(
+                "Yes, you have! My records show you completed the 'Security Awareness 2026' "
+                "course on March 12, 2026. Your certification is valid until March 12, 2027. "
+                "No further action is required at this time."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="personal",
+            timestamp=datetime(2026, 7, 22, 9, 0, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-002: technical intent, correct response
+        ConversationRecord(
+            conversation_id="IT-002",
+            user_query="Can you explain the difference between git merge and git rebase?",
+            dave_response=(
+                "Certainly! Both commands integrate changes from one branch into another, "
+                "but they do so differently:\n\n"
+                "• **Git Merge**: Combines the histories by creating a new 'merge commit' "
+                "that points to both parent branches. It preserves the complete history of both branches.\n"
+                "• **Git Rebase**: Rewrites project history by moving the base of your branch "
+                "to the latest commit on the target branch. It results in a cleaner, linear history.\n\n"
+                "Use merge to preserve exact history, and rebase to keep commits linear before merging."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="technical",
+            timestamp=datetime(2026, 7, 22, 9, 30, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-003: platform intent, correct response
+        ConversationRecord(
+            conversation_id="IT-003",
+            user_query="How do I access the Jira integration tool on the developer portal?",
+            dave_response=(
+                "To access the Jira integration on the developer portal, go to the top navigation bar, "
+                "select 'Tools' -> 'Integrations', then click 'Jira Service'. You will need to click "
+                "'Authorize Account' to link your corporate Jira account using SSO."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="platform",
+            timestamp=datetime(2026, 7, 22, 10, 0, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-004: out_of_scope intent, correct response
+        ConversationRecord(
+            conversation_id="IT-004",
+            user_query="Can you give me a recipe for chocolate chip cookies?",
+            dave_response=(
+                "I apologize, but I cannot assist with that. I am Dave, your internal operational "
+                "and technical AI assistant. I can only help you with questions about company policies, "
+                "technical support, and platform operations."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="out_of_scope",
+            timestamp=datetime(2026, 7, 22, 10, 30, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-005: ambiguous intent, correct clarification response
+        ConversationRecord(
+            conversation_id="IT-005",
+            user_query="Where can I find the document?",
+            dave_response=(
+                "I'd be happy to help you find the document, but could you specify which document "
+                "you are looking for? For example, are you looking for an HR policy, a technical "
+                "architecture spec, or a platform user guide?"
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="ambiguous",
+            timestamp=datetime(2026, 7, 22, 11, 0, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-006: personal intent, PLANTED ISSUE (Dave misclassifies as technical)
+        ConversationRecord(
+            conversation_id="IT-006",
+            user_query="How did I do on my last performance review?",
+            dave_response=(
+                "Performance reviews at our company are conducted semi-annually. The evaluation "
+                "process uses a 1-5 scale across three core competencies: Technical Delivery, "
+                "Collaboration, and Leadership. Managers submit reviews in Workday during the "
+                "Q2 and Q4 cycles."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="personal",
+            timestamp=datetime(2026, 7, 22, 11, 30, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-007: platform intent, PLANTED ISSUE (Dave misclassifies as technical/general)
+        ConversationRecord(
+            conversation_id="IT-007",
+            user_query="How do I configure my portal dashboard?",
+            dave_response=(
+                "To configure dashboards in web applications, you typically look for a settings gear "
+                "icon in the upper-right corner. You can drag and drop widgets, adjust grid layouts, "
+                "or customize theme settings using local storage preferences in your browser."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="platform",
+            timestamp=datetime(2026, 7, 22, 12, 0, 0, tzinfo=timezone.utc),
+        ),
+
+        # IT-008: ambiguous intent, PLANTED ISSUE (Dave does not clarify, assumes technical)
+        ConversationRecord(
+            conversation_id="IT-008",
+            user_query="Show me the logs.",
+            dave_response=(
+                "Here are the instructions to view application server logs:\n"
+                "1. Connect to the server via SSH.\n"
+                "2. Navigate to /var/log/app/.\n"
+                "3. Run `tail -f application.log` to stream logs in real-time."
+            ),
+            retrieved_context=None,
+            chat_history=None,
+            expected_intent="ambiguous",
+            timestamp=datetime(2026, 7, 22, 12, 30, 0, tzinfo=timezone.utc),
         ),
     ]
