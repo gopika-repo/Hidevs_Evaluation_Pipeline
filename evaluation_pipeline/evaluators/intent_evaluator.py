@@ -30,10 +30,10 @@ from evaluation_pipeline.utils.llm_client import LLMJudge
 logger = logging.getLogger(__name__)
 
 # Constants
-INTENT_ACCURACY_WEIGHT = 6.0
-CLARIFICATION_HANDLING_WEIGHT = 5.0
-MISCLASSIFICATION_WEIGHT = 4.0
-MAX_SCORE = 15.0
+INTENT_ACCURACY_WEIGHT = 8.0
+CLARIFICATION_HANDLING_WEIGHT = 20.0 / 3.0
+MISCLASSIFICATION_WEIGHT = 16.0 / 3.0
+MAX_SCORE = 20.0
 
 _SYSTEM_PROMPT = """\
 You are a STRICT, expert evaluation judge assessing an AI assistant's intent understanding.

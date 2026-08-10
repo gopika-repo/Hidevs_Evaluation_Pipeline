@@ -1,8 +1,9 @@
 """
 Score Aggregator — Phase 1
 
-Combines scores from Response Quality, Groundedness, and Safety evaluators
-into a unified Overall Health Score. Computes aggregate dataset statistics.
+Combines scores from Response Quality, Groundedness, Safety, Intent Understanding,
+and Memory & Context Continuity evaluators into a unified Overall Health Score.
+Computes aggregate dataset statistics.
 """
 
 from __future__ import annotations
@@ -26,17 +27,16 @@ class ScoreAggregator:
         gd_score: float,
         safety_score: float,
         intent_score: float = 0.0,
-        retrieval_score: float | None = 0.0,
+        memory_score: float = 20.0,
     ) -> float:
         """
         Calculate Overall Health Score.
 
         Formula:
-          Health = Response Quality (max 20) + Groundedness (max 15) + Safety (max 15) + Intent (max 15) + Retrieval (max 15)
-          # Phase 1 scope: max=80.
-          # Memory(10) + User Satisfaction(10) reserved for Phase 2.
+          Health = Response Quality (max 20) + Groundedness (max 20) + Safety (max 20) + Intent (max 20) + Memory (max 20)
+          # Phase 1 100-point architecture.
         """
-        health = rq_score + gd_score + safety_score + intent_score + (retrieval_score or 0.0)
+        health = rq_score + gd_score + safety_score + intent_score + memory_score
         return round(health, 2)
 
     def aggregate_dataset(
@@ -46,7 +46,7 @@ class ScoreAggregator:
         gd_results: list[EvaluationResult],
         safety_results: list[EvaluationResult],
         intent_results: list[EvaluationResult] | None = None,
-        retrieval_results: list[EvaluationResult] | None = None,
+        memory_results: list[EvaluationResult] | None = None,
     ) -> dict[str, Any]:
         """
         Aggregate results across the dataset and compute top-level statistics.
@@ -56,7 +56,7 @@ class ScoreAggregator:
         gd_map = {r.conversation_id: r for r in gd_results}
         safety_map = {r.conversation_id: r for r in safety_results}
         intent_map = {r.conversation_id: r for r in intent_results} if intent_results else {}
-        retrieval_map = {r.conversation_id: r for r in retrieval_results} if retrieval_results else {}
+        memory_map = {r.conversation_id: r for r in memory_results} if memory_results else {}
 
         convo_records = []
         flagged_count = 0
@@ -69,7 +69,7 @@ class ScoreAggregator:
         total_gd = 0.0
         total_safety = 0.0
         total_intent = 0.0
-        total_retrieval = 0.0
+        total_memory = 0.0
         total_health = 0.0
 
         for inp in inputs:
@@ -78,22 +78,22 @@ class ScoreAggregator:
             gd = gd_map.get(conv_id)
             safety = safety_map.get(conv_id)
             intent = intent_map.get(conv_id)
-            retrieval = retrieval_map.get(conv_id)
+            memory = memory_map.get(conv_id)
 
             if not rq or not gd or not safety:
                 logger.warning("Incomplete evaluation results for conversation '%s'", conv_id)
                 continue
 
             intent_score = intent.score if intent else 0.0
-            retrieval_score = retrieval.score if (retrieval and retrieval.applicable) else 0.0
-            health_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, retrieval_score)
+            memory_score = memory.score if memory else 20.0
+            health_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, memory_score)
 
             is_flagged = (
                 rq.flagged 
                 or gd.flagged 
                 or safety.flagged 
                 or (intent.flagged if intent else False)
-                or (retrieval.flagged if (retrieval and retrieval.applicable) else False)
+                or (memory.flagged if memory else False)
             )
             if is_flagged:
                 flagged_count += 1
@@ -104,8 +104,10 @@ class ScoreAggregator:
             total_safety += safety.score
             if intent:
                 total_intent += intent.score
-            if retrieval and retrieval.applicable and retrieval.score is not None:
-                total_retrieval += retrieval.score
+            if memory:
+                total_memory += memory.score
+            else:
+                total_memory += 20.0
             total_health += health_score
 
             if inp.conversation_type == ConversationType.CONTEXT_BACKED:
@@ -148,21 +150,21 @@ class ScoreAggregator:
                     "flagged": intent.flagged,
                 }
 
-            if retrieval:
-                evals["retrieval_quality"] = {
-                    "score": retrieval.score,
-                    "max_score": retrieval.max_score,
-                    "applicable": retrieval.applicable,
-                    "sub_scores": retrieval.sub_scores,
-                    "feedback": retrieval.feedback,
-                    "flagged": retrieval.flagged,
+            if memory:
+                evals["memory_and_continuity"] = {
+                    "score": memory.score,
+                    "max_score": memory.max_score,
+                    "applicable": memory.applicable,
+                    "sub_scores": memory.sub_scores,
+                    "feedback": memory.feedback,
+                    "flagged": memory.flagged,
                 }
             else:
-                evals["retrieval_quality"] = {
-                    "score": None,
-                    "max_score": 15.0,
+                evals["memory_and_continuity"] = {
+                    "score": 20.0,
+                    "max_score": 20.0,
                     "applicable": False,
-                    "feedback": "Not applicable — no retrieved context in this conversation.",
+                    "feedback": "Not applicable — single-turn conversation without chat history.",
                     "flagged": False,
                 }
 
@@ -183,12 +185,10 @@ class ScoreAggregator:
         }
         if intent_results:
             averages["intent_understanding"] = round(total_intent / count, 2)
-        if retrieval_results:
-            applicable_retrievals = [r.score for r in retrieval_results if r.applicable and r.score is not None]
-            if applicable_retrievals:
-                averages["retrieval_quality"] = round(sum(applicable_retrievals) / len(applicable_retrievals), 2)
-            else:
-                averages["retrieval_quality"] = 0.0
+        if memory_results:
+            averages["memory_and_continuity"] = round(total_memory / count, 2)
+        else:
+            averages["memory_and_continuity"] = 20.0
 
         summary_stats = {
             "total_conversations": len(convo_records),
