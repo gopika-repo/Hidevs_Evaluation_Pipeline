@@ -13,7 +13,10 @@ import logging
 import os
 import sys
 import time
+import json
+import argparse
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor
 
 from dotenv import load_dotenv
 
@@ -74,6 +77,20 @@ def main() -> None:
         logger.error("No valid evaluation inputs — aborting.")
         sys.exit(1)
 
+    # Command line argument parser for full vs quick mode
+    parser = argparse.ArgumentParser(description="Dave AI Assistant Evaluation Pipeline")
+    parser.add_argument("--full", action="store_true", help="Run the full 23-conversation batch")
+    args, unknown = parser.parse_known_args()
+
+    full_mode = args.full or os.getenv("PIPELINE_MODE") == "full"
+    if not full_mode:
+        print("Running in QUICK mode (first 5 conversations). Use --full or PIPELINE_MODE=full for the entire batch.", flush=True)
+        logger.info("Running in QUICK mode (first 5 conversations). Use --full or PIPELINE_MODE=full for the entire batch.")
+        evaluation_inputs = evaluation_inputs[:5]
+    else:
+        print(f"Running in FULL mode (all {len(evaluation_inputs)} conversations).", flush=True)
+        logger.info("Running in FULL mode (all %d conversations).", len(evaluation_inputs))
+
     _print_dataset_summary(evaluation_inputs)
 
     from evaluation_pipeline.evaluators.response_quality_evaluator import ResponseQualityEvaluator
@@ -96,6 +113,22 @@ def main() -> None:
     retrieval_results = []
 
     total_convs = len(evaluation_inputs)
+    
+    # Report realistic time estimate upfront
+    avg_sec = 25.0  # default fallback
+    stats_file = "logs/last_run_stats.json"
+    if os.path.exists(stats_file):
+        try:
+            with open(stats_file, "r") as sf:
+                stats = json.load(sf)
+                avg_sec = stats.get("avg_seconds_per_convo", 25.0)
+        except Exception:
+            pass
+    est_total_sec = avg_sec * total_convs
+    est_min = est_total_sec / 60.0
+    print(f"Estimated runtime: ~{est_min:.1f} minutes for {total_convs} conversations (based on average {avg_sec:.1f}s per conversation).", flush=True)
+    logger.info("Estimated runtime: ~%.1f minutes for %d conversations.", est_min, total_convs)
+
     logger.info("-" * 70)
     logger.info("PHASE 1 — Running Batch Evaluations (conversation-by-conversation)")
     logger.info("-" * 70)
@@ -105,29 +138,73 @@ def main() -> None:
     for idx, eval_input in enumerate(evaluation_inputs, start=1):
         conv_id = eval_input.conversation_id
         conv_start_time = time.time()
+        msg_start = f"[{idx}/{total_convs}] Starting evaluation for conversation_id={conv_id}"
+        print(msg_start, flush=True)
         logger.info("-" * 70)
-        logger.info("[%d/%d] Starting evaluation for conversation_id=%s", idx, total_convs, conv_id)
+        logger.info(msg_start)
         logger.info("-" * 70)
 
-        # 1. Response Quality
-        logger.info("[%d/%d] Running ResponseQualityEvaluator...", idx, total_convs)
-        try:
-            rq_res = rq_evaluator.evaluate(eval_input)
-            logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, rq_res.score, rq_res.max_score)
-        except Exception as exc:
-            logger.error("[%d/%d] ResponseQualityEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
-            rq_res = EvaluationResult(
-                evaluator_name=rq_evaluator.name,
-                conversation_id=conv_id,
-                score=0.0,
-                max_score=20.0,
-                sub_scores={},
-                feedback=f"Evaluation failed with error: {exc}",
-                flagged=True,
-            )
-        rq_results.append(rq_res)
+        # Run independent evaluators (RQ, Safety, Intent) in parallel
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            future_rq = executor.submit(rq_evaluator.evaluate, eval_input)
+            future_sf = executor.submit(safety_evaluator.evaluate, eval_input)
+            future_it = executor.submit(intent_evaluator.evaluate, eval_input)
 
-        # 2. Groundedness
+            # 1. Response Quality
+            logger.info("[%d/%d] Running ResponseQualityEvaluator...", idx, total_convs)
+            try:
+                rq_res = future_rq.result()
+                logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, rq_res.score, rq_res.max_score)
+            except Exception as exc:
+                logger.error("[%d/%d] ResponseQualityEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                rq_res = EvaluationResult(
+                    evaluator_name=rq_evaluator.name,
+                    conversation_id=conv_id,
+                    score=0.0,
+                    max_score=20.0,
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+            rq_results.append(rq_res)
+
+            # 2. Safety
+            logger.info("[%d/%d] Running SafetyEvaluator...", idx, total_convs)
+            try:
+                safety_res = future_sf.result()
+                logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, safety_res.score, safety_res.max_score)
+            except Exception as exc:
+                logger.error("[%d/%d] SafetyEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                safety_res = EvaluationResult(
+                    evaluator_name=safety_evaluator.name,
+                    conversation_id=conv_id,
+                    score=0.0,
+                    max_score=15.0,
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+            safety_results.append(safety_res)
+
+            # 3. Intent Understanding
+            logger.info("[%d/%d] Running IntentEvaluator...", idx, total_convs)
+            try:
+                intent_res = future_it.result()
+                logger.info("[%d/%d] IntentEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, intent_res.score, intent_res.max_score)
+            except Exception as exc:
+                logger.error("[%d/%d] IntentEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                intent_res = EvaluationResult(
+                    evaluator_name=intent_evaluator.name,
+                    conversation_id=conv_id,
+                    score=0.0,
+                    max_score=15.0,
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+            intent_results.append(intent_res)
+
+        # 4. Groundedness (sequential)
         logger.info("[%d/%d] Running GroundednessEvaluator...", idx, total_convs)
         try:
             gd_res = gd_evaluator.evaluate(eval_input)
@@ -145,43 +222,7 @@ def main() -> None:
             )
         gd_results.append(gd_res)
 
-        # 3. Safety
-        logger.info("[%d/%d] Running SafetyEvaluator...", idx, total_convs)
-        try:
-            safety_res = safety_evaluator.evaluate(eval_input)
-            logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, safety_res.score, safety_res.max_score)
-        except Exception as exc:
-            logger.error("[%d/%d] SafetyEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
-            safety_res = EvaluationResult(
-                evaluator_name=safety_evaluator.name,
-                conversation_id=conv_id,
-                score=0.0,
-                max_score=15.0,
-                sub_scores={},
-                feedback=f"Evaluation failed with error: {exc}",
-                flagged=True,
-            )
-        safety_results.append(safety_res)
-
-        # 4. Intent Understanding
-        logger.info("[%d/%d] Running IntentEvaluator...", idx, total_convs)
-        try:
-            intent_res = intent_evaluator.evaluate(eval_input)
-            logger.info("[%d/%d] IntentEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, intent_res.score, intent_res.max_score)
-        except Exception as exc:
-            logger.error("[%d/%d] IntentEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
-            intent_res = EvaluationResult(
-                evaluator_name=intent_evaluator.name,
-                conversation_id=conv_id,
-                score=0.0,
-                max_score=15.0,
-                sub_scores={},
-                feedback=f"Evaluation failed with error: {exc}",
-                flagged=True,
-            )
-        intent_results.append(intent_res)
-
-        # 5. Retrieval Quality
+        # 5. Retrieval Quality (sequential)
         logger.info("[%d/%d] Running RetrievalEvaluator...", idx, total_convs)
         try:
             retrieval_res = retrieval_evaluator.evaluate(eval_input)
@@ -202,13 +243,22 @@ def main() -> None:
         retrieval_results.append(retrieval_res)
 
         elapsed = time.time() - conv_start_time
-        logger.info("[%d/%d] Completed evaluation for conversation_id=%s. Evaluators run: ResponseQuality, Groundedness, Safety, Intent, Retrieval. Time elapsed: %.2fs", 
-                    idx, total_convs, conv_id, elapsed)
+        msg_finish = f"[{idx}/{total_convs}] Finished evaluation for conversation_id={conv_id} in {elapsed:.2f}s"
+        print(msg_finish, flush=True)
+        logger.info(msg_finish)
 
     batch_elapsed = time.time() - batch_start_time
     logger.info("=" * 70)
     logger.info("BATCH COMPLETE: Processed %d/%d conversations in %.2fs", total_convs, total_convs, batch_elapsed)
     logger.info("=" * 70)
+
+    # Save run statistics for future runtime estimates
+    avg_seconds = batch_elapsed / total_convs if total_convs > 0 else 0.0
+    try:
+        with open("logs/last_run_stats.json", "w") as sf:
+            json.dump({"avg_seconds_per_convo": avg_seconds, "last_run_time": batch_elapsed}, sf)
+    except Exception:
+        pass
 
 
     # ------------------------------------------------------------------
