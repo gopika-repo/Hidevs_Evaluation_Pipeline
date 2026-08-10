@@ -1,8 +1,9 @@
 """
 Score Aggregator — Phase 1
 
-Combines scores from Response Quality, Groundedness, Safety, and Intent Understanding
-evaluators into a unified Overall Health Score. Computes aggregate dataset statistics.
+Combines scores from Response Quality, Groundedness, Safety, Intent Understanding,
+and Memory & Context Continuity evaluators into a unified Overall Health Score.
+Computes aggregate dataset statistics.
 """
 
 from __future__ import annotations
@@ -26,15 +27,17 @@ class ScoreAggregator:
         gd_score: float,
         safety_score: float,
         intent_score: float = 0.0,
+        memory_score: float | None = None,
     ) -> float:
         """
         Calculate Overall Health Score.
 
         Formula:
-          Health = Response Quality (max 20) + Groundedness (max 20) + Safety (max 20) + Intent (max 20)
-          # Phase 1 80-point architecture.
+          Health = Response Quality (max 20) + Groundedness (max 20) + Safety (max 20) + Intent (max 20) + Memory (max 20, if applicable)
         """
         health = rq_score + gd_score + safety_score + intent_score
+        if memory_score is not None:
+            health += memory_score
         return round(health, 2)
 
     def aggregate_dataset(
@@ -44,6 +47,7 @@ class ScoreAggregator:
         gd_results: list[EvaluationResult],
         safety_results: list[EvaluationResult],
         intent_results: list[EvaluationResult] | None = None,
+        memory_results: list[EvaluationResult] | None = None,
     ) -> dict[str, Any]:
         """
         Aggregate results across the dataset and compute top-level statistics.
@@ -53,6 +57,7 @@ class ScoreAggregator:
         gd_map = {r.conversation_id: r for r in gd_results}
         safety_map = {r.conversation_id: r for r in safety_results}
         intent_map = {r.conversation_id: r for r in intent_results} if intent_results else {}
+        memory_map = {r.conversation_id: r for r in memory_results} if memory_results else {}
 
         convo_records = []
         flagged_count = 0
@@ -65,7 +70,10 @@ class ScoreAggregator:
         total_gd = 0.0
         total_safety = 0.0
         total_intent = 0.0
+        total_memory = 0.0
+        memory_applicable_count = 0
         total_health = 0.0
+        total_max_health = 0.0
 
         for inp in inputs:
             conv_id = inp.conversation_id
@@ -73,19 +81,33 @@ class ScoreAggregator:
             gd = gd_map.get(conv_id)
             safety = safety_map.get(conv_id)
             intent = intent_map.get(conv_id)
+            memory = memory_map.get(conv_id)
 
             if not rq or not gd or not safety:
                 logger.warning("Incomplete evaluation results for conversation '%s'", conv_id)
                 continue
 
             intent_score = intent.score if intent else 0.0
-            health_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score)
+            
+            memory_val = None
+            max_health_convo = 60.0
+            if intent:
+                max_health_convo = 80.0 # With intent and 3 default metrics, max is 80.0
+
+            if memory and memory.applicable:
+                memory_val = memory.score
+                max_health_convo += 20.0
+                total_memory += memory.score
+                memory_applicable_count += 1
+
+            health_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, memory_val)
 
             is_flagged = (
                 rq.flagged 
                 or gd.flagged 
                 or safety.flagged 
                 or (intent.flagged if intent else False)
+                or (memory.flagged if (memory and memory.applicable) else False)
             )
             if is_flagged:
                 flagged_count += 1
@@ -97,6 +119,7 @@ class ScoreAggregator:
             if intent:
                 total_intent += intent.score
             total_health += health_score
+            total_max_health += max_health_convo
 
             if inp.conversation_type == ConversationType.CONTEXT_BACKED:
                 gd_cb_scores.append(gd.score)
@@ -138,10 +161,22 @@ class ScoreAggregator:
                     "flagged": intent.flagged,
                 }
 
+            if memory:
+                evals["memory_and_continuity"] = {
+                    "score": memory.score,
+                    "max_score": memory.max_score,
+                    "applicable": memory.applicable,
+                    "percentage": memory.percentage,
+                    "sub_scores": memory.sub_scores,
+                    "feedback": memory.feedback,
+                    "flagged": memory.flagged,
+                }
+
             convo_records.append({
                 "conversation_id": conv_id,
                 "conversation_type": inp.conversation_type.value,
                 "overall_health_score": health_score,
+                "max_health_score": max_health_convo,
                 "flagged": is_flagged,
                 "evaluations": evals
             })
@@ -152,9 +187,12 @@ class ScoreAggregator:
             "groundedness": round(total_gd / count, 2),
             "safety": round(total_safety / count, 2),
             "overall_health": round(total_health / count, 2),
+            "max_health": round(total_max_health / count, 2),
         }
         if intent_results:
             averages["intent_understanding"] = round(total_intent / count, 2)
+        if memory_applicable_count > 0:
+            averages["memory_and_continuity"] = round(total_memory / memory_applicable_count, 2)
 
         summary_stats = {
             "total_conversations": len(convo_records),

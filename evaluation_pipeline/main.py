@@ -88,17 +88,20 @@ def main() -> None:
     from evaluation_pipeline.evaluators.groundedness_evaluator import GroundednessEvaluator
     from evaluation_pipeline.evaluators.safety_evaluator import SafetyEvaluator
     from evaluation_pipeline.evaluators.intent_evaluator import IntentEvaluator
+    from evaluation_pipeline.evaluators.memory_evaluator import MemoryEvaluator
     from evaluation_pipeline.data.models import EvaluationResult
 
     rq_evaluator = ResponseQualityEvaluator()
     gd_evaluator = GroundednessEvaluator()
     safety_evaluator = SafetyEvaluator()
     intent_evaluator = IntentEvaluator()
+    memory_evaluator = MemoryEvaluator()
 
     rq_results = []
     gd_results = []
     safety_results = []
     intent_results = []
+    memory_results = []
 
     total_convs = len(evaluation_inputs)
     
@@ -132,11 +135,12 @@ def main() -> None:
         logger.info(msg_start)
         logger.info("-" * 70)
 
-        # Run independent evaluators (RQ, Safety, Intent) in parallel
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        # Run independent evaluators in parallel
+        with ThreadPoolExecutor(max_workers=4) as executor:
             future_rq = executor.submit(rq_evaluator.evaluate, eval_input)
             future_sf = executor.submit(safety_evaluator.evaluate, eval_input)
             future_it = executor.submit(intent_evaluator.evaluate, eval_input)
+            future_me = executor.submit(memory_evaluator.evaluate, eval_input)
 
             # 1. Response Quality
             logger.info("[%d/%d] Running ResponseQualityEvaluator...", idx, total_convs)
@@ -167,7 +171,7 @@ def main() -> None:
                     evaluator_name=safety_evaluator.name,
                     conversation_id=conv_id,
                     score=0.0,
-                    max_score=15.0,
+                    max_score=20.0,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -185,14 +189,34 @@ def main() -> None:
                     evaluator_name=intent_evaluator.name,
                     conversation_id=conv_id,
                     score=0.0,
-                    max_score=15.0,
+                    max_score=20.0,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
                 )
             intent_results.append(intent_res)
 
-        # 4. Groundedness (sequential)
+            # 4. Memory & Continuity
+            logger.info("[%d/%d] Running MemoryEvaluator...", idx, total_convs)
+            try:
+                me_res = future_me.result()
+                score_str = f"{me_res.score:.2f}" if me_res.applicable else "N/A"
+                logger.info("[%d/%d] MemoryEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, me_res.max_score)
+            except Exception as exc:
+                logger.error("[%d/%d] MemoryEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                me_res = EvaluationResult(
+                    evaluator_name=memory_evaluator.name,
+                    conversation_id=conv_id,
+                    score=None,
+                    max_score=20.0,
+                    applicable=False,
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+            memory_results.append(me_res)
+
+        # 5. Groundedness (sequential)
         logger.info("[%d/%d] Running GroundednessEvaluator...", idx, total_convs)
         try:
             gd_res = gd_evaluator.evaluate(eval_input)
@@ -203,7 +227,7 @@ def main() -> None:
                 evaluator_name=gd_evaluator.name,
                 conversation_id=conv_id,
                 score=0.0,
-                max_score=15.0,
+                max_score=20.0,
                 sub_scores={},
                 feedback=f"Evaluation failed with error: {exc}",
                 flagged=True,
@@ -246,6 +270,7 @@ def main() -> None:
         gd_results,
         safety_results,
         intent_results,
+        memory_results,
     )
 
     # ------------------------------------------------------------------
@@ -270,7 +295,8 @@ def main() -> None:
     _print_results_table("GROUNDEDNESS RESULTS (max=20)", gd_results)
     _print_results_table("SAFETY RESULTS (max=20)", safety_results)
     _print_results_table("INTENT UNDERSTANDING RESULTS (max=20)", intent_results)
-    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-80 scale)", aggregated_data["conversations"])
+    _print_results_table("MEMORY & CONTEXT CONTINUITY (max=20)", memory_results)
+    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-80/100 scale)", aggregated_data["conversations"])
 
     # ------------------------------------------------------------------
     # 8. Detailed feedback inspection (3+ samples)
@@ -281,13 +307,14 @@ def main() -> None:
         gd_results,
         safety_results,
         intent_results,
+        memory_results,
         aggregated_data["conversations"]
     )
 
     # ------------------------------------------------------------------
     # 9. Summary statistics
     # ------------------------------------------------------------------
-    _print_summary_stats(rq_results, gd_results, safety_results, intent_results, aggregated_data)
+    _print_summary_stats(rq_results, gd_results, safety_results, intent_results, memory_results, aggregated_data)
 
     logger.info(
         "Phase 1 complete. Total evaluation time: %.1fs", batch_elapsed
@@ -326,7 +353,9 @@ def _print_results_table(title: str, results: list) -> None:
     print("  " + "-" * 86)
 
     for r in results:
-        if r.score is None:
+        # Check applicability
+        applicable = getattr(r, "applicable", True)
+        if not applicable or r.score is None:
             pct_str = "  N/A%"
             score_str = "     N/A"
         else:
@@ -354,7 +383,7 @@ def _print_health_table(title: str, records: list) -> None:
     print(f"  {title}")
     print("=" * 90)
     print(
-        f"  {'ID':<10} {'Type':<15} {'Health Score':>14} {'Flagged':<8}"
+        f"  {'ID':<10} {'Type':<15} {'Health Score':>14} {'Max Health':>12} {'Flagged':<8}"
     )
     print("  " + "-" * 86)
 
@@ -362,7 +391,7 @@ def _print_health_table(title: str, records: list) -> None:
         flag_str = "! YES" if r["flagged"] else "  no"
         print(
             f"  {r['conversation_id']:<10} {r['conversation_type']:<15} "
-            f"{r['overall_health_score']:>14.2f} {flag_str:<8}"
+            f"{r['overall_health_score']:>14.2f} {r.get('max_health_score', 80.0):>12.2f} {flag_str:<8}"
         )
 
     print()
@@ -374,6 +403,7 @@ def _print_detailed_inspection(
     gd_results: list,
     safety_results: list,
     intent_results: list,
+    memory_results: list,
     records: list,
 ) -> None:
     """
@@ -386,6 +416,7 @@ def _print_detailed_inspection(
     gd_by_id = {r.conversation_id: r for r in gd_results}
     safety_by_id = {r.conversation_id: r for r in safety_results}
     intent_by_id = {r.conversation_id: r for r in intent_results}
+    memory_by_id = {r.conversation_id: r for r in memory_results}
     record_by_id = {r["conversation_id"]: r for r in records}
 
     print("=" * 90)
@@ -402,7 +433,7 @@ def _print_detailed_inspection(
             continue
 
         print(f"\n{'-' * 90}")
-        print(f"  CONVERSATION: {conv_id} | Health Score: {rec['overall_health_score']:.2f}")
+        print(f"  CONVERSATION: {conv_id} | Health Score: {rec['overall_health_score']:.2f} / {rec.get('max_health_score', 80.0):.2f}")
         print(f"{'-' * 90}")
 
         # Find the input for context
@@ -433,6 +464,14 @@ def _print_detailed_inspection(
             for line in intent.feedback.split("\n"):
                 print(f"  {line}")
 
+        memory = memory_by_id.get(conv_id)
+        if memory:
+            app_str = f"({memory.score}/{memory.max_score})" if memory.applicable else "(Not Applicable)"
+            print(f"\n  -- Memory & Context Continuity {app_str} "
+                  f"{'! FLAGGED' if (memory.applicable and memory.flagged) else ''} --")
+            for line in memory.feedback.split("\n"):
+                print(f"  {line}")
+
     print()
 
 
@@ -441,6 +480,7 @@ def _print_summary_stats(
     gd_results: list,
     safety_results: list,
     intent_results: list,
+    memory_results: list,
     aggregated_data: dict,
 ) -> None:
     """Print aggregate statistics across all evaluations."""
@@ -459,7 +499,9 @@ def _print_summary_stats(
     print(f"    Safety:             {averages['safety']:.2f} / 20.00")
     if "intent_understanding" in averages:
         print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 20.00")
-    print(f"    Overall Health:     {averages['overall_health']:.2f} / 80.00  (Phase 1 scope)")
+    if "memory_and_continuity" in averages:
+        print(f"    Memory Continuity:  {averages['memory_and_continuity']:.2f} / 20.00")
+    print(f"    Overall Health:     {averages['overall_health']:.2f} / {averages.get('max_health', 80.0):.2f} (Phase 1 scope)")
     print(f"  Groundedness Breakdown:")
     print(f"    Context-backed avg: {breakdown['context_backed_average']:.2f} (count: {breakdown['context_backed_count']})")
     print(f"    Context-free avg:   {breakdown['context_free_average']:.2f} (count: {breakdown['context_free_count']})")
