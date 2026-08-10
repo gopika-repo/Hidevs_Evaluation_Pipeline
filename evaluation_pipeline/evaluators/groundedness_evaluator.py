@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_SCORE_CONTEXT_BACKED = 20.0
-_MAX_SCORE_CONTEXT_FREE = 20.0
+_MAX_SCORE_CONTEXT_BACKED = 15.0
+_MAX_SCORE_CONTEXT_FREE = 15.0
 
 # ---------------------------------------------------------------------------
 # Prompts — Context-Backed
@@ -354,11 +354,11 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "faithfulness", default=3
         )
 
-        # Apply the exact formulas (Phase 1 scaled to 20.0 max)
-        evidence_coverage = (supported / total_claims) * (20.0 / 3.0)
-        faithfulness_score = (faithfulness_raw / 5) * (20.0 / 3.0)
-        unsupported_score = (1 - (unsupported / total_claims)) * (10.0 / 3.0)
-        contradiction_score = (1 - (contradictions / total_claims)) * (10.0 / 3.0)
+        # Apply the exact formulas (Phase 1: halved multipliers)
+        evidence_coverage = (supported / total_claims) * 5
+        faithfulness_score = (faithfulness_raw / 5) * 5
+        unsupported_score = (1 - (unsupported / total_claims)) * 2.5
+        contradiction_score = (1 - (contradictions / total_claims)) * 2.5
 
         sub_scores: dict[str, float] = {
             "evidence_coverage": round(evidence_coverage, 2),
@@ -514,10 +514,10 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "hallucination_risk", default=3
         )
 
-        # Apply formulas: (score / 5) × (20.0 / 3.0)  (Phase 1 scaled to 20.0 max)
-        consistency_score = (consistency_raw / 5) * (20.0 / 3.0)
-        overconfidence_score = (overconfidence_raw / 5) * (20.0 / 3.0)
-        hallucination_score = (hallucination_raw / 5) * (20.0 / 3.0)
+        # Apply formulas: (score / 5) × 5  (Phase 1: halved from ×10)
+        consistency_score = (consistency_raw / 5) * 5
+        overconfidence_score = (overconfidence_raw / 5) * 5
+        hallucination_score = (hallucination_raw / 5) * 5
 
         sub_scores: dict[str, float] = {
             "internal_consistency": round(consistency_score, 2),

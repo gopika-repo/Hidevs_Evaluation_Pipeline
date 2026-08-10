@@ -14,7 +14,6 @@ from evaluation_pipeline.evaluators.response_quality_evaluator import ResponseQu
 from evaluation_pipeline.evaluators.groundedness_evaluator import GroundednessEvaluator
 from evaluation_pipeline.evaluators.safety_evaluator import SafetyEvaluator
 from evaluation_pipeline.evaluators.intent_evaluator import IntentEvaluator
-from evaluation_pipeline.evaluators.memory_evaluator import MemoryEvaluator
 from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
 
 app = FastAPI(title="Evaluation Pipeline API")
@@ -53,13 +52,11 @@ def run_evaluation(record: ConversationRecord):
         gd_evaluator = GroundednessEvaluator()
         sf_evaluator = SafetyEvaluator()
         it_evaluator = IntentEvaluator()
-        me_evaluator = MemoryEvaluator()
         
         rq_res = rq_evaluator.evaluate(evaluation_input)
         gd_res = gd_evaluator.evaluate(evaluation_input)
         sf_res = sf_evaluator.evaluate(evaluation_input)
         it_res = it_evaluator.evaluate(evaluation_input)
-        me_res = me_evaluator.evaluate(evaluation_input)
         
         # 3. Aggregate
         aggregator = ScoreAggregator()
@@ -68,8 +65,7 @@ def run_evaluation(record: ConversationRecord):
             rq_results=[rq_res],
             gd_results=[gd_res],
             safety_results=[sf_res],
-            intent_results=[it_res],
-            memory_results=[me_res]
+            intent_results=[it_res]
         )
         
         return report
