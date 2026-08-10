@@ -3,9 +3,6 @@ import sys
 import json
 sys.path.append(os.path.abspath("."))
 
-# Ensure patch is applied
-import evaluation_pipeline.utils.ragas_compat_patch
-
 from fastapi.testclient import TestClient
 from app import app
 from evaluation_pipeline.data.mock_conversations import get_mock_conversations
@@ -27,8 +24,6 @@ def test_api():
     print("CB-001 Response Keys:", report_cb.keys())
     convo_cb = report_cb["conversations"][0]
     print("Overall Health Score:", convo_cb["overall_health_score"])
-    print("Retrieval Quality evaluation present:", "retrieval_quality" in convo_cb["evaluations"])
-    print("Retrieval Quality details:", json.dumps(convo_cb["evaluations"]["retrieval_quality"], indent=2))
     print("-"*50)
     
     # 2. Context-free
@@ -41,7 +36,6 @@ def test_api():
     report_cf = res_cf.json()
     convo_cf = report_cf["conversations"][0]
     print("Overall Health Score:", convo_cf["overall_health_score"])
-    print("Retrieval Quality details:", json.dumps(convo_cf["evaluations"]["retrieval_quality"], indent=2))
     print("="*50)
 
 if __name__ == "__main__":
