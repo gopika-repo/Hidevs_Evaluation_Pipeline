@@ -183,12 +183,15 @@ Score each dimension 1–5 (5 = good, no issues). Return ONLY valid JSON.
 
 def _run_trulens_groundedness(
     context: str, response: str
-) -> float | None:
+) -> dict[str, Any]:
     """
     Run TruLens groundedness evaluation.
-
-    Returns a float score [0, 1] or None if TruLens is unavailable.
     """
+    if not context or not context.strip():
+        return {
+            "status": "not_applicable",
+            "reason": "No retrieved context available"
+        }
     try:
         from trulens.providers.litellm import LiteLLM
         import os
@@ -200,38 +203,34 @@ def _run_trulens_groundedness(
             source=context,
             statement=response,
         )
-        # TruLens returns (score, dict_of_reasons) or just a score
         if isinstance(score, tuple):
-            return float(score[0])
-        return float(score)
+            score_val = float(score[0])
+        else:
+            score_val = float(score)
 
-    except ImportError:
-        logger.warning(
-            "TruLens not available (import failed). "
-            "Skipping TruLens groundedness comparison."
-        )
-        return None
+        return {
+            "status": "success",
+            "score": score_val
+        }
     except Exception as exc:
-        logger.warning(
-            "TruLens groundedness evaluation failed: %s. "
-            "Continuing with custom evaluation only.",
-            exc,
-        )
-        return None
+        logger.warning("TruLens groundedness evaluation failed: %s", exc)
+        return {
+            "status": "failed",
+            "error": str(exc)
+        }
 
-
-# ---------------------------------------------------------------------------
-# DeepEval integration (optional — graceful degradation)
-# ---------------------------------------------------------------------------
 
 def _run_deepeval_faithfulness(
     user_query: str, response: str, context: str
-) -> float | None:
+) -> dict[str, Any]:
     """
     Run DeepEval faithfulness evaluation.
-
-    Returns a float score [0, 1] or None if DeepEval is unavailable.
     """
+    if not context or not context.strip():
+        return {
+            "status": "not_applicable",
+            "reason": "No retrieved context available"
+        }
     try:
         from deepeval.metrics import FaithfulnessMetric
         from deepeval.test_case import LLMTestCase
@@ -250,21 +249,16 @@ def _run_deepeval_faithfulness(
             threshold=0.7,
         )
         metric.measure(test_case)
-        return float(metric.score)
-
-    except ImportError:
-        logger.warning(
-            "DeepEval not available (import failed). "
-            "Skipping DeepEval faithfulness comparison."
-        )
-        return None
+        return {
+            "status": "success",
+            "score": float(metric.score)
+        }
     except Exception as exc:
-        logger.warning(
-            "DeepEval faithfulness evaluation failed: %s. "
-            "Continuing with custom evaluation only.",
-            exc,
-        )
-        return None
+        logger.warning("DeepEval faithfulness evaluation failed: %s", exc)
+        return {
+            "status": "failed",
+            "error": str(exc)
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -319,8 +313,8 @@ class GroundednessEvaluator(BaseEvaluator):
         response = eval_input.dave_response
 
         # --- Run custom judge + TruLens + DeepEval concurrently ----------
-        trulens_score: float | None = None
-        deepeval_score: float | None = None
+        trulens_res: dict[str, Any] = {}
+        deepeval_res: dict[str, Any] = {}
         parsed_json: dict[str, Any] = {}
         raw_text: str = ""
 
@@ -341,8 +335,8 @@ class GroundednessEvaluator(BaseEvaluator):
 
             # Collect results
             parsed_json, raw_text = future_custom.result()
-            trulens_score = future_trulens.result()
-            deepeval_score = future_deepeval.result()
+            trulens_res = future_trulens.result()
+            deepeval_res = future_deepeval.result()
 
         # --- Compute scores from custom judge ----
         total_claims = max(parsed_json.get("total_claims", 1), 1)  # avoid div/0
@@ -367,11 +361,22 @@ class GroundednessEvaluator(BaseEvaluator):
             "contradiction_detection": round(contradiction_score, 2),
         }
 
-        # Store comparison scores from external frameworks
-        if trulens_score is not None:
-            sub_scores["trulens_groundedness"] = round(trulens_score, 4)
-        if deepeval_score is not None:
-            sub_scores["deepeval_faithfulness"] = round(deepeval_score, 4)
+        # Store comparison details from external frameworks
+        sub_scores["trulens_status"] = trulens_res["status"]
+        if trulens_res["status"] == "success":
+            sub_scores["trulens_score"] = round(trulens_res["score"], 4)
+        elif trulens_res["status"] == "failed":
+            sub_scores["trulens_error"] = trulens_res["error"]
+        else:
+            sub_scores["trulens_reason"] = trulens_res["reason"]
+
+        sub_scores["deepeval_status"] = deepeval_res["status"]
+        if deepeval_res["status"] == "success":
+            sub_scores["deepeval_score"] = round(deepeval_res["score"], 4)
+        elif deepeval_res["status"] == "failed":
+            sub_scores["deepeval_error"] = deepeval_res["error"]
+        else:
+            sub_scores["deepeval_reason"] = deepeval_res["reason"]
 
         total_score = round(
             evidence_coverage
@@ -383,7 +388,7 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Build feedback from LLM's actual output
         feedback = self._build_context_backed_feedback(
-            parsed_json, sub_scores, trulens_score, deepeval_score
+            parsed_json, sub_scores
         )
 
         # Flag if score < 50% or any contradictions found
@@ -424,9 +429,7 @@ class GroundednessEvaluator(BaseEvaluator):
     @staticmethod
     def _build_context_backed_feedback(
         parsed: dict[str, Any],
-        sub_scores: dict[str, float],
-        trulens_score: float | None,
-        deepeval_score: float | None,
+        sub_scores: dict[str, float]
     ) -> str:
         """Build human-readable feedback from the judge's analysis."""
         parts: list[str] = []
@@ -467,10 +470,21 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         # External framework comparison
-        if trulens_score is not None:
-            parts.append(f"TruLens Groundedness (comparison): {trulens_score:.4f}")
-        if deepeval_score is not None:
-            parts.append(f"DeepEval Faithfulness (comparison): {deepeval_score:.4f}")
+        trulens_status = sub_scores.get("trulens_status", "unknown")
+        if trulens_status == "success":
+            parts.append(f"TruLens Groundedness (comparison): {sub_scores.get('trulens_score', 0.0):.4f}")
+        elif trulens_status == "failed":
+            parts.append(f"TruLens Groundedness (comparison): FAILED. Error: {sub_scores.get('trulens_error', '')}")
+        else:
+            parts.append(f"TruLens Groundedness (comparison): NOT APPLICABLE. Reason: {sub_scores.get('trulens_reason', '')}")
+
+        deepeval_status = sub_scores.get("deepeval_status", "unknown")
+        if deepeval_status == "success":
+            parts.append(f"DeepEval Faithfulness (comparison): {sub_scores.get('deepeval_score', 0.0):.4f}")
+        elif deepeval_status == "failed":
+            parts.append(f"DeepEval Faithfulness (comparison): FAILED. Error: {sub_scores.get('deepeval_error', '')}")
+        else:
+            parts.append(f"DeepEval Faithfulness (comparison): NOT APPLICABLE. Reason: {sub_scores.get('deepeval_reason', '')}")
 
         return "\n\n".join(parts) if parts else "No feedback generated."
 
@@ -524,6 +538,10 @@ class GroundednessEvaluator(BaseEvaluator):
             "internal_consistency": round(consistency_score, 2),
             "overconfidence": round(overconfidence_score, 2),
             "hallucination_risk": round(hallucination_score, 2),
+            "trulens_status": "not_applicable",
+            "trulens_reason": "No retrieved context available",
+            "deepeval_status": "not_applicable",
+            "deepeval_reason": "No retrieved context available",
         }
 
         total_score = round(
@@ -579,6 +597,10 @@ class GroundednessEvaluator(BaseEvaluator):
             f"Overconfidence={sub_scores.get('overconfidence', 0)}/6.67, "
             f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/6.66"
         )
+
+        # External framework comparison
+        parts.append("TruLens Groundedness (comparison): NOT APPLICABLE. Reason: No retrieved context available")
+        parts.append("DeepEval Faithfulness (comparison): NOT APPLICABLE. Reason: No retrieved context available")
 
         return "\n\n".join(parts) if parts else "No feedback generated."
 

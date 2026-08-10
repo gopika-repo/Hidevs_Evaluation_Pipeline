@@ -10,7 +10,7 @@ from __future__ import annotations
 import enum
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Any
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -169,7 +169,7 @@ class EvaluationResult(BaseModel):
     percentage: Optional[float] = Field(
         default=None, description="Optional percentage representation of the score"
     )
-    sub_scores: dict[str, float] = Field(
+    sub_scores: dict[str, Any] = Field(
         default_factory=dict, description="Component score breakdown"
     )
     feedback: str = Field(
