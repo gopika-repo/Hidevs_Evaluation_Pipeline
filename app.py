@@ -19,6 +19,17 @@ from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
 
 app = FastAPI(title="Evaluation Pipeline API")
 
+@app.middleware("http")
+async def log_requests(request, call_next):
+    print(f"--> Incoming request: {request.method} {request.url}", flush=True)
+    try:
+        response = await call_next(request)
+        print(f"<-- Request finished: {request.method} {request.url} - Status: {response.status_code}", flush=True)
+        return response
+    except Exception as e:
+        print(f"<-- Request failed: {request.method} {request.url} - Error: {str(e)}", flush=True)
+        raise
+
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Dave Evaluation Pipeline API. Use /evaluate to evaluate a conversation."}
@@ -68,4 +79,4 @@ def run_evaluation(record: ConversationRecord):
         raise HTTPException(status_code=500, detail=f"Evaluation failed: {str(e)}")
 
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=False)
