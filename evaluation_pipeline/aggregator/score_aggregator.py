@@ -31,8 +31,8 @@ class ScoreAggregator:
         Calculate Overall Health Score.
 
         Formula:
-          Health = Response Quality (max 20) + Groundedness (max 15) + Safety (max 15) + Intent (max 15)
-          # Phase 1 65-point architecture.
+          Health = Response Quality (max 20) + Groundedness (max 20) + Safety (max 20) + Intent (max 20)
+          # Phase 1 80-point architecture.
         """
         health = rq_score + gd_score + safety_score + intent_score
         return round(health, 2)

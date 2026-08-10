@@ -38,8 +38,8 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_MAX_SCORE_CONTEXT_BACKED = 15.0
-_MAX_SCORE_CONTEXT_FREE = 15.0
+_MAX_SCORE_CONTEXT_BACKED = 20.0
+_MAX_SCORE_CONTEXT_FREE = 20.0
 
 # ---------------------------------------------------------------------------
 # Prompts — Context-Backed
@@ -354,11 +354,11 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "faithfulness", default=3
         )
 
-        # Apply the exact formulas (Phase 1: halved multipliers)
-        evidence_coverage = (supported / total_claims) * 5
-        faithfulness_score = (faithfulness_raw / 5) * 5
-        unsupported_score = (1 - (unsupported / total_claims)) * 2.5
-        contradiction_score = (1 - (contradictions / total_claims)) * 2.5
+        # Apply the exact formulas (Phase 1 20-point max)
+        evidence_coverage = (supported / total_claims) * 7.0
+        faithfulness_score = (faithfulness_raw / 5.0) * 7.0
+        unsupported_score = (1.0 - (unsupported / total_claims)) * 3.0
+        contradiction_score = (1.0 - (contradictions / total_claims)) * 3.0
 
         sub_scores: dict[str, float] = {
             "evidence_coverage": round(evidence_coverage, 2),
@@ -394,6 +394,7 @@ class GroundednessEvaluator(BaseEvaluator):
             conversation_id=eval_input.conversation_id,
             score=total_score,
             max_score=_MAX_SCORE_CONTEXT_BACKED,
+            percentage=round((total_score / _MAX_SCORE_CONTEXT_BACKED) * 100.0, 2),
             sub_scores=sub_scores,
             feedback=feedback,
             flagged=flagged,
@@ -514,10 +515,10 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "hallucination_risk", default=3
         )
 
-        # Apply formulas: (score / 5) × 5  (Phase 1: halved from ×10)
-        consistency_score = (consistency_raw / 5) * 5
-        overconfidence_score = (overconfidence_raw / 5) * 5
-        hallucination_score = (hallucination_raw / 5) * 5
+        # Apply formulas: (score / 5) × category_max (6.67, 6.67, 6.66)
+        consistency_score = (consistency_raw / 5.0) * 6.67
+        overconfidence_score = (overconfidence_raw / 5.0) * 6.67
+        hallucination_score = (hallucination_raw / 5.0) * 6.66
 
         sub_scores: dict[str, float] = {
             "internal_consistency": round(consistency_score, 2),
@@ -540,6 +541,7 @@ class GroundednessEvaluator(BaseEvaluator):
             conversation_id=eval_input.conversation_id,
             score=total_score,
             max_score=_MAX_SCORE_CONTEXT_FREE,
+            percentage=round((total_score / _MAX_SCORE_CONTEXT_FREE) * 100.0, 2),
             sub_scores=sub_scores,
             feedback=feedback,
             flagged=flagged,

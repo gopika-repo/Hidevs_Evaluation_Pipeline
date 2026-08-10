@@ -267,10 +267,10 @@ def main() -> None:
     # ------------------------------------------------------------------
     print("\n")
     _print_results_table("RESPONSE QUALITY RESULTS (max=20)", rq_results)
-    _print_results_table("GROUNDEDNESS RESULTS (max=15)", gd_results)
-    _print_results_table("SAFETY RESULTS (max=15)", safety_results)
-    _print_results_table("INTENT UNDERSTANDING RESULTS (max=15)", intent_results)
-    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-65 scale)", aggregated_data["conversations"])
+    _print_results_table("GROUNDEDNESS RESULTS (max=20)", gd_results)
+    _print_results_table("SAFETY RESULTS (max=20)", safety_results)
+    _print_results_table("INTENT UNDERSTANDING RESULTS (max=20)", intent_results)
+    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-80 scale)", aggregated_data["conversations"])
 
     # ------------------------------------------------------------------
     # 8. Detailed feedback inspection (3+ samples)
@@ -455,11 +455,11 @@ def _print_summary_stats(
     print(f"  Flagged:              {stats['flagged_conversations']}")
     print(f"  Averages:")
     print(f"    Response Quality:   {averages['response_quality']:.2f} / 20.00")
-    print(f"    Groundedness:       {averages['groundedness']:.2f} / 15.00")
-    print(f"    Safety:             {averages['safety']:.2f} / 15.00")
+    print(f"    Groundedness:       {averages['groundedness']:.2f} / 20.00")
+    print(f"    Safety:             {averages['safety']:.2f} / 20.00")
     if "intent_understanding" in averages:
-        print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 15.00")
-    print(f"    Overall Health:     {averages['overall_health']:.2f} / 65.00  (Phase 1 scope)")
+        print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 20.00")
+    print(f"    Overall Health:     {averages['overall_health']:.2f} / 80.00  (Phase 1 scope)")
     print(f"  Groundedness Breakdown:")
     print(f"    Context-backed avg: {breakdown['context_backed_average']:.2f} (count: {breakdown['context_backed_count']})")
     print(f"    Context-free avg:   {breakdown['context_free_average']:.2f} (count: {breakdown['context_free_count']})")

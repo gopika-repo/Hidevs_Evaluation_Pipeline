@@ -169,6 +169,7 @@ class ResponseQualityEvaluator(BaseEvaluator):
             conversation_id=eval_input.conversation_id,
             score=total_score,
             max_score=float(_MAX_TOTAL),
+            percentage=round((total_score / _MAX_TOTAL) * 100.0, 2),
             sub_scores=sub_scores,
             feedback=feedback,
             flagged=flagged,
