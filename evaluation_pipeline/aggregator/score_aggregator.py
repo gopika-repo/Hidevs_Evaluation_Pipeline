@@ -30,10 +30,7 @@ class ScoreAggregator:
         memory_score: float | None = None,
     ) -> float:
         """
-        Calculate Overall Health Score.
-
-        Formula:
-          Health = Response Quality (max 20) + Groundedness (max 20) + Safety (max 20) + Intent (max 20) + Memory (max 20, if applicable)
+        Calculate raw applicable score.
         """
         health = rq_score + gd_score + safety_score + intent_score
         if memory_score is not None:
@@ -72,8 +69,7 @@ class ScoreAggregator:
         total_intent = 0.0
         total_memory = 0.0
         memory_applicable_count = 0
-        total_health = 0.0
-        total_max_health = 0.0
+        total_normalized_health = 0.0
 
         for inp in inputs:
             conv_id = inp.conversation_id
@@ -90,17 +86,18 @@ class ScoreAggregator:
             intent_score = intent.score if intent else 0.0
             
             memory_val = None
-            max_health_convo = 60.0
+            max_health_convo = rq.max_score + gd.max_score + safety.max_score
             if intent:
-                max_health_convo = 80.0 # With intent and 3 default metrics, max is 80.0
+                max_health_convo += intent.max_score
 
             if memory and memory.applicable:
                 memory_val = memory.score
-                max_health_convo += 20.0
+                max_health_convo += memory.max_score
                 total_memory += memory.score
                 memory_applicable_count += 1
 
-            health_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, memory_val)
+            raw_app_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, memory_val)
+            overall_health_score = round((raw_app_score / max_health_convo) * 100.0, 2)
 
             is_flagged = (
                 rq.flagged 
@@ -118,8 +115,7 @@ class ScoreAggregator:
             total_safety += safety.score
             if intent:
                 total_intent += intent.score
-            total_health += health_score
-            total_max_health += max_health_convo
+            total_normalized_health += overall_health_score
 
             if inp.conversation_type == ConversationType.CONTEXT_BACKED:
                 gd_cb_scores.append(gd.score)
@@ -175,8 +171,9 @@ class ScoreAggregator:
             convo_records.append({
                 "conversation_id": conv_id,
                 "conversation_type": inp.conversation_type.value,
-                "overall_health_score": health_score,
-                "max_health_score": max_health_convo,
+                "raw_applicable_score": raw_app_score,
+                "applicable_max_score": max_health_convo,
+                "overall_health_score": overall_health_score,
                 "flagged": is_flagged,
                 "evaluations": evals
             })
@@ -186,8 +183,7 @@ class ScoreAggregator:
             "response_quality": round(total_rq / count, 2),
             "groundedness": round(total_gd / count, 2),
             "safety": round(total_safety / count, 2),
-            "overall_health": round(total_health / count, 2),
-            "max_health": round(total_max_health / count, 2),
+            "overall_health": round(total_normalized_health / count, 2),
         }
         if intent_results:
             averages["intent_understanding"] = round(total_intent / count, 2)

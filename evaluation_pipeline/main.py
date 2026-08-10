@@ -383,7 +383,7 @@ def _print_health_table(title: str, records: list) -> None:
     print(f"  {title}")
     print("=" * 90)
     print(
-        f"  {'ID':<10} {'Type':<15} {'Health Score':>14} {'Max Health':>12} {'Flagged':<8}"
+        f"  {'ID':<10} {'Type':<15} {'Raw Score':>10} {'App Max':>10} {'Health (0-100)':>15} {'Flagged':<8}"
     )
     print("  " + "-" * 86)
 
@@ -391,7 +391,8 @@ def _print_health_table(title: str, records: list) -> None:
         flag_str = "! YES" if r["flagged"] else "  no"
         print(
             f"  {r['conversation_id']:<10} {r['conversation_type']:<15} "
-            f"{r['overall_health_score']:>14.2f} {r.get('max_health_score', 80.0):>12.2f} {flag_str:<8}"
+            f"{r['raw_applicable_score']:>10.2f} {r['applicable_max_score']:>10.0f} "
+            f"{r['overall_health_score']:>15.2f} {flag_str:<8}"
         )
 
     print()
@@ -433,7 +434,7 @@ def _print_detailed_inspection(
             continue
 
         print(f"\n{'-' * 90}")
-        print(f"  CONVERSATION: {conv_id} | Health Score: {rec['overall_health_score']:.2f} / {rec.get('max_health_score', 80.0):.2f}")
+        print(f"  CONVERSATION: {conv_id} | Raw Score: {rec['raw_applicable_score']:.2f}/{rec['applicable_max_score']:.0f} | Health Score: {rec['overall_health_score']:.2f}/100")
         print(f"{'-' * 90}")
 
         # Find the input for context
