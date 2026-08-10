@@ -1,13 +1,19 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 import uvicorn
 import os
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 from pydantic import BaseModel
 from datetime import datetime
-from evaluation_pipeline.data.models import ConversationRecord
+from evaluation_pipeline.data.models import ConversationRecord, EvaluationResult
 from evaluation_pipeline.data.dataset_builder import DatasetBuilder
 from evaluation_pipeline.evaluators.response_quality_evaluator import ResponseQualityEvaluator
 from evaluation_pipeline.evaluators.groundedness_evaluator import GroundednessEvaluator
@@ -47,18 +53,100 @@ def run_evaluation(record: ConversationRecord):
     evaluation_input = inputs[0]
     
     try:
-        # 2. Run evaluators
+        # 2. Run evaluators concurrently with timeouts
         rq_evaluator = ResponseQualityEvaluator()
         gd_evaluator = GroundednessEvaluator()
         sf_evaluator = SafetyEvaluator()
         it_evaluator = IntentEvaluator()
         me_evaluator = MemoryEvaluator()
         
-        rq_res = rq_evaluator.evaluate(evaluation_input)
-        gd_res = gd_evaluator.evaluate(evaluation_input)
-        sf_res = sf_evaluator.evaluate(evaluation_input)
-        it_res = it_evaluator.evaluate(evaluation_input)
-        me_res = me_evaluator.evaluate(evaluation_input)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            future_rq = executor.submit(rq_evaluator.evaluate, evaluation_input)
+            future_gd = executor.submit(gd_evaluator.evaluate, evaluation_input)
+            future_sf = executor.submit(sf_evaluator.evaluate, evaluation_input)
+            future_it = executor.submit(it_evaluator.evaluate, evaluation_input)
+            future_me = executor.submit(me_evaluator.evaluate, evaluation_input)
+            
+            # Response Quality
+            try:
+                rq_res = future_rq.result(timeout=45.0)
+            except Exception as exc:
+                logger.error("ResponseQualityEvaluator failed: %s", exc, exc_info=True)
+                rq_res = EvaluationResult(
+                    evaluator_name=rq_evaluator.name,
+                    conversation_id=evaluation_input.conversation_id,
+                    score=0.0,
+                    max_score=20.0,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+
+            # Groundedness
+            try:
+                gd_res = future_gd.result(timeout=45.0)
+            except Exception as exc:
+                logger.error("GroundednessEvaluator failed: %s", exc, exc_info=True)
+                gd_res = EvaluationResult(
+                    evaluator_name=gd_evaluator.name,
+                    conversation_id=evaluation_input.conversation_id,
+                    score=0.0,
+                    max_score=20.0,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+
+            # Safety
+            try:
+                sf_res = future_sf.result(timeout=45.0)
+            except Exception as exc:
+                logger.error("SafetyEvaluator failed: %s", exc, exc_info=True)
+                sf_res = EvaluationResult(
+                    evaluator_name=sf_evaluator.name,
+                    conversation_id=evaluation_input.conversation_id,
+                    score=0.0,
+                    max_score=20.0,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+
+            # Intent
+            try:
+                it_res = future_it.result(timeout=45.0)
+            except Exception as exc:
+                logger.error("IntentEvaluator failed: %s", exc, exc_info=True)
+                it_res = EvaluationResult(
+                    evaluator_name=it_evaluator.name,
+                    conversation_id=evaluation_input.conversation_id,
+                    score=0.0,
+                    max_score=20.0,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
+
+            # Memory
+            try:
+                me_res = future_me.result(timeout=45.0)
+            except Exception as exc:
+                logger.error("MemoryEvaluator failed: %s", exc, exc_info=True)
+                me_res = EvaluationResult(
+                    evaluator_name=me_evaluator.name,
+                    conversation_id=evaluation_input.conversation_id,
+                    score=None,
+                    max_score=20.0,
+                    applicable=False,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Evaluation failed with error: {exc}",
+                    flagged=True,
+                )
         
         # 3. Aggregate
         aggregator = ScoreAggregator()

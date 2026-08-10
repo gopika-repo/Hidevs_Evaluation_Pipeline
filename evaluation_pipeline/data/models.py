@@ -183,6 +183,9 @@ class EvaluationResult(BaseModel):
     critical_violation: bool = Field(
         default=False, description="Whether a critical safety or policy violation occurred"
     )
+    status: str = Field(
+        default="success", description="Status of the evaluation: success, failed, or not_applicable"
+    )
 
     @field_validator("feedback")
     @classmethod
