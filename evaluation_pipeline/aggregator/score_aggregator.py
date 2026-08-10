@@ -162,6 +162,7 @@ class ScoreAggregator:
                     "score": memory.score,
                     "max_score": memory.max_score,
                     "applicable": memory.applicable,
+                    "status": getattr(memory, "status", "not_applicable" if not memory.applicable else "success"),
                     "percentage": memory.percentage,
                     "sub_scores": memory.sub_scores,
                     "feedback": memory.feedback,
