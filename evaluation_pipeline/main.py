@@ -34,6 +34,11 @@ logger = logging.getLogger("evaluation_pipeline.main")
 
 def main() -> None:
     """Run the full Phase 0A + 0B + 0C pipeline."""
+    # Ensure logs dir exists and append progress file handler
+    os.makedirs("logs", exist_ok=True)
+    file_handler = logging.FileHandler("logs/pipeline_progress.log", encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s | %(name)-35s | %(levelname)-7s | %(message)s", "%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(file_handler)
 
     logger.info("=" * 70)
     logger.info("Dave Evaluation Pipeline — Phase 1")
@@ -71,89 +76,140 @@ def main() -> None:
 
     _print_dataset_summary(evaluation_inputs)
 
-    # ------------------------------------------------------------------
-    # 3. Run Response Quality Evaluator
-    # ------------------------------------------------------------------
-    from evaluation_pipeline.evaluators.response_quality_evaluator import (
-        ResponseQualityEvaluator,
-    )
-
-    logger.info("-" * 70)
-    logger.info("PHASE 0B — Running Response Quality Evaluator")
-    logger.info("-" * 70)
+    from evaluation_pipeline.evaluators.response_quality_evaluator import ResponseQualityEvaluator
+    from evaluation_pipeline.evaluators.groundedness_evaluator import GroundednessEvaluator
+    from evaluation_pipeline.evaluators.safety_evaluator import SafetyEvaluator
+    from evaluation_pipeline.evaluators.intent_evaluator import IntentEvaluator
+    from evaluation_pipeline.evaluators.retrieval_evaluator import RetrievalEvaluator
+    from evaluation_pipeline.data.models import EvaluationResult
 
     rq_evaluator = ResponseQualityEvaluator()
-    rq_start = time.time()
-    rq_results = rq_evaluator.evaluate_batch(evaluation_inputs)
-    rq_elapsed = time.time() - rq_start
-    logger.info(
-        "Response Quality evaluation complete: %d results in %.1fs",
-        len(rq_results),
-        rq_elapsed,
-    )
-
-    # ------------------------------------------------------------------
-    # 4. Run Groundedness Evaluator
-    # ------------------------------------------------------------------
-    from evaluation_pipeline.evaluators.groundedness_evaluator import (
-        GroundednessEvaluator,
-    )
-
-    logger.info("-" * 70)
-    logger.info("PHASE 0B — Running Groundedness Evaluator")
-    logger.info("-" * 70)
-
     gd_evaluator = GroundednessEvaluator()
-    gd_start = time.time()
-    gd_results = gd_evaluator.evaluate_batch(evaluation_inputs)
-    gd_elapsed = time.time() - gd_start
-    logger.info(
-        "Groundedness evaluation complete: %d results in %.1fs",
-        len(gd_results),
-        gd_elapsed,
-    )
-
-    # ------------------------------------------------------------------
-    # 5. Run Safety Evaluator (Phase 0C)
-    # ------------------------------------------------------------------
-    from evaluation_pipeline.evaluators.safety_evaluator import (
-        SafetyEvaluator,
-    )
-
-    logger.info("-" * 70)
-    logger.info("PHASE 0C — Running Safety Evaluator")
-    logger.info("-" * 70)
-
     safety_evaluator = SafetyEvaluator()
-    safety_start = time.time()
-    safety_results = safety_evaluator.evaluate_batch(evaluation_inputs)
-    safety_elapsed = time.time() - safety_start
-    logger.info(
-        "Safety evaluation complete: %d results in %.1fs",
-        len(safety_results),
-        safety_elapsed,
-    )
-
-    # ------------------------------------------------------------------
-    # 5.5. Run Intent Understanding Evaluator (Phase 1B)
-    # ------------------------------------------------------------------
-    from evaluation_pipeline.evaluators.intent_evaluator import (
-        IntentEvaluator,
-    )
-
-    logger.info("-" * 70)
-    logger.info("PHASE 1B — Running Intent Understanding Evaluator")
-    logger.info("-" * 70)
-
     intent_evaluator = IntentEvaluator()
-    intent_start = time.time()
-    intent_results = intent_evaluator.evaluate_batch(evaluation_inputs)
-    intent_elapsed = time.time() - intent_start
-    logger.info(
-        "Intent evaluation complete: %d results in %.1fs",
-        len(intent_results),
-        intent_elapsed,
-    )
+    retrieval_evaluator = RetrievalEvaluator()
+
+    rq_results = []
+    gd_results = []
+    safety_results = []
+    intent_results = []
+    retrieval_results = []
+
+    total_convs = len(evaluation_inputs)
+    logger.info("-" * 70)
+    logger.info("PHASE 1 — Running Batch Evaluations (conversation-by-conversation)")
+    logger.info("-" * 70)
+
+    batch_start_time = time.time()
+
+    for idx, eval_input in enumerate(evaluation_inputs, start=1):
+        conv_id = eval_input.conversation_id
+        conv_start_time = time.time()
+        logger.info("-" * 70)
+        logger.info("[%d/%d] Starting evaluation for conversation_id=%s", idx, total_convs, conv_id)
+        logger.info("-" * 70)
+
+        # 1. Response Quality
+        logger.info("[%d/%d] Running ResponseQualityEvaluator...", idx, total_convs)
+        try:
+            rq_res = rq_evaluator.evaluate(eval_input)
+            logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, rq_res.score, rq_res.max_score)
+        except Exception as exc:
+            logger.error("[%d/%d] ResponseQualityEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            rq_res = EvaluationResult(
+                evaluator_name=rq_evaluator.name,
+                conversation_id=conv_id,
+                score=0.0,
+                max_score=20.0,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+        rq_results.append(rq_res)
+
+        # 2. Groundedness
+        logger.info("[%d/%d] Running GroundednessEvaluator...", idx, total_convs)
+        try:
+            gd_res = gd_evaluator.evaluate(eval_input)
+            logger.info("[%d/%d] GroundednessEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, gd_res.score, gd_res.max_score)
+        except Exception as exc:
+            logger.error("[%d/%d] GroundednessEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            gd_res = EvaluationResult(
+                evaluator_name=gd_evaluator.name,
+                conversation_id=conv_id,
+                score=0.0,
+                max_score=15.0,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+        gd_results.append(gd_res)
+
+        # 3. Safety
+        logger.info("[%d/%d] Running SafetyEvaluator...", idx, total_convs)
+        try:
+            safety_res = safety_evaluator.evaluate(eval_input)
+            logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, safety_res.score, safety_res.max_score)
+        except Exception as exc:
+            logger.error("[%d/%d] SafetyEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            safety_res = EvaluationResult(
+                evaluator_name=safety_evaluator.name,
+                conversation_id=conv_id,
+                score=0.0,
+                max_score=15.0,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+        safety_results.append(safety_res)
+
+        # 4. Intent Understanding
+        logger.info("[%d/%d] Running IntentEvaluator...", idx, total_convs)
+        try:
+            intent_res = intent_evaluator.evaluate(eval_input)
+            logger.info("[%d/%d] IntentEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, intent_res.score, intent_res.max_score)
+        except Exception as exc:
+            logger.error("[%d/%d] IntentEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            intent_res = EvaluationResult(
+                evaluator_name=intent_evaluator.name,
+                conversation_id=conv_id,
+                score=0.0,
+                max_score=15.0,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+        intent_results.append(intent_res)
+
+        # 5. Retrieval Quality
+        logger.info("[%d/%d] Running RetrievalEvaluator...", idx, total_convs)
+        try:
+            retrieval_res = retrieval_evaluator.evaluate(eval_input)
+            score_str = f"score={retrieval_res.score:.2f}/{retrieval_res.max_score:.2f}" if retrieval_res.applicable else "N/A"
+            logger.info("[%d/%d] RetrievalEvaluator finished for %s (%s)", idx, total_convs, conv_id, score_str)
+        except Exception as exc:
+            logger.error("[%d/%d] RetrievalEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            retrieval_res = EvaluationResult(
+                evaluator_name=retrieval_evaluator.name,
+                conversation_id=conv_id,
+                score=None,
+                max_score=15.0,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+                applicable=False,
+            )
+        retrieval_results.append(retrieval_res)
+
+        elapsed = time.time() - conv_start_time
+        logger.info("[%d/%d] Completed evaluation for conversation_id=%s. Evaluators run: ResponseQuality, Groundedness, Safety, Intent, Retrieval. Time elapsed: %.2fs", 
+                    idx, total_convs, conv_id, elapsed)
+
+    batch_elapsed = time.time() - batch_start_time
+    logger.info("=" * 70)
+    logger.info("BATCH COMPLETE: Processed %d/%d conversations in %.2fs", total_convs, total_convs, batch_elapsed)
+    logger.info("=" * 70)
+
 
     # ------------------------------------------------------------------
     # 6. Aggregate Scores (Phase 0C)
@@ -173,6 +229,7 @@ def main() -> None:
         gd_results,
         safety_results,
         intent_results,
+        retrieval_results,
     )
 
     # ------------------------------------------------------------------
@@ -197,7 +254,8 @@ def main() -> None:
     _print_results_table("GROUNDEDNESS RESULTS (max=15)", gd_results)
     _print_results_table("SAFETY RESULTS (max=15)", safety_results)
     _print_results_table("INTENT UNDERSTANDING RESULTS (max=15)", intent_results)
-    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-65 scale)", aggregated_data["conversations"])
+    _print_results_table("RETRIEVAL QUALITY RESULTS (max=15)", retrieval_results)
+    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-80 scale)", aggregated_data["conversations"])
 
     # ------------------------------------------------------------------
     # 9. Detailed feedback inspection (3+ samples)
@@ -208,17 +266,17 @@ def main() -> None:
         gd_results,
         safety_results,
         intent_results,
+        retrieval_results,
         aggregated_data["conversations"]
     )
 
     # ------------------------------------------------------------------
     # 10. Summary statistics
     # ------------------------------------------------------------------
-    _print_summary_stats(rq_results, gd_results, safety_results, intent_results, aggregated_data)
+    _print_summary_stats(rq_results, gd_results, safety_results, intent_results, retrieval_results, aggregated_data)
 
-    total_elapsed = rq_elapsed + gd_elapsed + safety_elapsed + intent_elapsed
     logger.info(
-        "Phase 1 complete. Total evaluation time: %.1fs", total_elapsed
+        "Phase 1 complete. Total evaluation time: %.1fs", batch_elapsed
     )
 
 
@@ -254,15 +312,22 @@ def _print_results_table(title: str, results: list) -> None:
     print("  " + "-" * 86)
 
     for r in results:
-        pct = (r.score / r.max_score * 100) if r.max_score > 0 else 0
+        if r.score is None:
+            pct_str = "  N/A%"
+            score_str = "     N/A"
+        else:
+            pct = (r.score / r.max_score * 100) if r.max_score > 0 else 0
+            pct_str = f"{pct:>6.1f}%"
+            score_str = f"{r.score:>8.2f}"
+
         flag_str = "! YES" if r.flagged else "  no"
         sub_str = ", ".join(f"{k}={v}" for k, v in r.sub_scores.items())
         # Truncate sub-scores display if too long
         if len(sub_str) > 50:
             sub_str = sub_str[:47] + "..."
         print(
-            f"  {r.conversation_id:<10} {r.score:>8.2f} "
-            f"{r.max_score:>6.0f} {pct:>6.1f}% "
+            f"  {r.conversation_id:<10} {score_str} "
+            f"{r.max_score:>6.0f} {pct_str} "
             f"{flag_str:<8} {sub_str}"
         )
 
@@ -295,6 +360,7 @@ def _print_detailed_inspection(
     gd_results: list,
     safety_results: list,
     intent_results: list,
+    retrieval_results: list,
     records: list,
 ) -> None:
     """
@@ -313,6 +379,7 @@ def _print_detailed_inspection(
     gd_by_id = {r.conversation_id: r for r in gd_results}
     safety_by_id = {r.conversation_id: r for r in safety_results}
     intent_by_id = {r.conversation_id: r for r in intent_results}
+    retrieval_by_id = {r.conversation_id: r for r in retrieval_results}
     record_by_id = {r["conversation_id"]: r for r in records}
 
     print("=" * 90)
@@ -360,6 +427,14 @@ def _print_detailed_inspection(
             for line in intent.feedback.split("\n"):
                 print(f"  {line}")
 
+        ret = retrieval_by_id.get(conv_id)
+        if ret:
+            score_label = f"{ret.score}/{ret.max_score}" if ret.applicable else "N/A"
+            print(f"\n  -- Retrieval Quality ({score_label}) "
+                  f"{'! FLAGGED' if ret.flagged else ''} --")
+            for line in ret.feedback.split("\n"):
+                print(f"  {line}")
+
     print()
 
 
@@ -368,6 +443,7 @@ def _print_summary_stats(
     gd_results: list,
     safety_results: list,
     intent_results: list,
+    retrieval_results: list,
     aggregated_data: dict,
 ) -> None:
     """Print aggregate statistics across all evaluations."""
@@ -386,7 +462,9 @@ def _print_summary_stats(
     print(f"    Safety:             {averages['safety']:.2f} / 15.00")
     if "intent_understanding" in averages:
         print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 15.00")
-    print(f"    Overall Health:     {averages['overall_health']:.2f} / 65.00  (Phase 1 scope)")
+    if "retrieval_quality" in averages:
+        print(f"    Retrieval Quality:  {averages['retrieval_quality']:.2f} / 15.00")
+    print(f"    Overall Health:     {averages['overall_health']:.2f} / 80.00  (Phase 1 scope)")
     print(f"  Groundedness Breakdown:")
     print(f"    Context-backed avg: {breakdown['context_backed_average']:.2f} (count: {breakdown['context_backed_count']})")
     print(f"    Context-free avg:   {breakdown['context_free_average']:.2f} (count: {breakdown['context_free_count']})")

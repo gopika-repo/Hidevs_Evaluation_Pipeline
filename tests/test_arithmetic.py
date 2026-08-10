@@ -29,6 +29,9 @@ from evaluation_pipeline.evaluators.safety_evaluator import (
 from evaluation_pipeline.evaluators.intent_evaluator import (
     IntentEvaluator,
 )
+from evaluation_pipeline.evaluators.retrieval_evaluator import (
+    RetrievalEvaluator,
+)
 from evaluation_pipeline.aggregator.score_aggregator import (
     ScoreAggregator,
 )
@@ -106,11 +109,11 @@ class TestEvaluationArithmetic(unittest.TestCase):
         self.assertEqual(total_score, 12.0)
 
     def test_score_aggregator_arithmetic(self) -> None:
-        """Phase 1: RQ(max=20) + GD(max=15) + Safety(max=15) + Intent(max=15) = max 65."""
-        # RQ = 18.0, GD = 12.5, Safety = 14.0, Intent = 12.0
-        # Health = 18 + 12.5 + 14 + 12 = 56.5
-        health = ScoreAggregator.calculate_health_score(18.0, 12.5, 14.0, 12.0)
-        self.assertEqual(health, 56.5)
+        """Phase 1: RQ(max=20) + GD(max=15) + Safety(max=15) + Intent(max=15) + Retrieval(max=15) = max 80."""
+        # RQ = 18.0, GD = 12.5, Safety = 14.0, Intent = 12.0, Retrieval = 10.0
+        # Health = 18 + 12.5 + 14 + 12 + 10 = 66.5
+        health = ScoreAggregator.calculate_health_score(18.0, 12.5, 14.0, 12.0, 10.0)
+        self.assertEqual(health, 66.5)
 
 
 class TestSafetyEvaluatorLogic(unittest.TestCase):
@@ -330,6 +333,99 @@ class TestIntentEvaluatorLogic(unittest.TestCase):
         result = self.evaluator.evaluate(self.eval_input)
         self.assertEqual(result.score, 15.0)
         self.assertNotIn("intent_match", result.sub_scores)
+
+
+class TestRetrievalEvaluatorLogic(unittest.TestCase):
+    """
+    Tests the RetrievalEvaluator arithmetic and logic.
+    Mocks out Ragas and LLM judge calls.
+    """
+
+    @patch.dict('os.environ', {'GOOGLE_API_KEY': 'mock_key'})
+    def setUp(self) -> None:
+        self.evaluator = RetrievalEvaluator()
+        self.eval_input_cb = EvaluationInput(
+            conversation_id="test_ret_cb",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Query",
+            dave_response="Response",
+            retrieved_context="Context",
+            retrieved_chunks=["Chunk 1", "Chunk 2"],
+            timestamp=datetime.now(timezone.utc)
+        )
+        self.eval_input_cf = EvaluationInput(
+            conversation_id="test_ret_cf",
+            conversation_type=ConversationType.CONTEXT_FREE,
+            user_query="Query",
+            dave_response="Response",
+            retrieved_context=None,
+            retrieved_chunks=None,
+            timestamp=datetime.now(timezone.utc)
+        )
+
+    def test_context_free_not_applicable(self):
+        """Retrieval quality is not applicable for context-free conversations."""
+        result = self.evaluator.evaluate(self.eval_input_cf)
+        self.assertIsNone(result.score)
+        self.assertFalse(result.applicable)
+        self.assertEqual(result.max_score, 15.0)
+        self.assertIn("Not applicable", result.feedback)
+
+    def test_context_backed_perfect_score(self):
+        """Perfect precision, recall, and no noise -> 15.0."""
+        self.evaluator._run_ragas_evaluation = MagicMock(return_value={
+            "context_precision": 1.0,
+            "context_recall": 1.0
+        })
+        self.evaluator._run_llm_judge = MagicMock(return_value={
+            "coverage_score": {"score": 5, "reasoning": "Excellent"},
+            "total_chunk_count": 2,
+            "duplicate_or_irrelevant_count": 0,
+            "explanation": "Perfect"
+        })
+
+        result = self.evaluator.evaluate(self.eval_input_cb)
+        self.assertEqual(result.score, 15.0)
+        self.assertEqual(result.sub_scores["context_precision"], 6.0)
+        self.assertEqual(result.sub_scores["context_recall"], 5.0)
+        self.assertEqual(result.sub_scores["noise_redundancy"], 4.0)
+        self.assertTrue(result.applicable)
+        self.assertFalse(result.flagged)
+
+    def test_context_backed_imperfect_score(self):
+        """Imperfect scores -> correctly scaled total score."""
+        self.evaluator._run_ragas_evaluation = MagicMock(return_value={
+            "context_precision": 0.5,
+            "context_recall": 0.8
+        })
+        self.evaluator._run_llm_judge = MagicMock(return_value={
+            "coverage_score": {"score": 4, "reasoning": "Good coverage but missing details"},
+            "total_chunk_count": 4,
+            "duplicate_or_irrelevant_count": 1,
+            "explanation": "Minor noise"
+        })
+
+        result = self.evaluator.evaluate(self.eval_input_cb)
+        # precision: 0.5 * 6 = 3.0
+        # recall: 0.8 * 5 = 4.0
+        # noise: (1 - 1/4) * 4 = 3.0
+        # total: 3 + 4 + 3 = 10.0
+        self.assertEqual(result.score, 10.0)
+        self.assertEqual(result.sub_scores["context_precision"], 3.0)
+        self.assertEqual(result.sub_scores["context_recall"], 4.0)
+        self.assertEqual(result.sub_scores["noise_redundancy"], 3.0)
+
+    @patch('evaluation_pipeline.evaluators.retrieval_evaluator.evaluate')
+    def test_ragas_result_conversion_failure(self, mock_evaluate):
+        """If Ragas evaluate return type cannot be converted to dict, raises TypeError."""
+        class BadRagasResult:
+            def __iter__(self):
+                raise ValueError("Cannot iterate")
+        mock_evaluate.return_value = BadRagasResult()
+        
+        with self.assertRaises(TypeError) as context:
+            self.evaluator._run_ragas_evaluation("q", "a", ["c"], "gt")
+        self.assertIn("Ragas result conversion failed", str(context.exception))
 
 
 if __name__ == "__main__":

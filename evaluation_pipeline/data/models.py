@@ -72,6 +72,10 @@ class ConversationRecord(BaseModel):
         default=None,
         description="Ground-truth intent label for testing; None in production",
     )
+    retrieved_chunks: Optional[list[str]] = Field(
+        default=None,
+        description="Individual retrieved chunks if available separately",
+    )
     timestamp: datetime = Field(
         ..., description="Conversation timestamp"
     )
@@ -95,7 +99,8 @@ class ConversationRecord(BaseModel):
                 "retrieved_context": "HiDevs is a developer community platform focused on AI, hackathons, learning and projects.",
                 "chat_history": "User: Tell me about HiDevs.",
                 "timestamp": "2026-08-07T10:00:00Z",
-                "expected_intent": "technical"
+                "expected_intent": "technical",
+                "retrieved_chunks": ["HiDevs is a developer community platform focused on AI, hackathons, learning and projects."]
             }
         }
     }
@@ -118,6 +123,7 @@ class EvaluationInput(BaseModel):
     retrieved_context: Optional[str] = None
     chat_history: Optional[str] = None
     expected_intent: Optional[str] = None
+    retrieved_chunks: Optional[list[str]] = None
     timestamp: datetime
     conversation_type: ConversationType = Field(
         ..., description="Auto-tagged based on retrieved_context presence"
@@ -157,8 +163,9 @@ class EvaluationResult(BaseModel):
     conversation_id: str = Field(
         ..., min_length=1, description="Conversation this result belongs to"
     )
-    score: float = Field(..., ge=0.0, description="Aggregate score")
+    score: Optional[float] = Field(default=None, ge=0.0, description="Aggregate score")
     max_score: float = Field(..., gt=0.0, description="Maximum possible score")
+    applicable: bool = Field(default=True, description="Whether this metric is applicable to the conversation")
     percentage: Optional[float] = Field(
         default=None, description="Optional percentage representation of the score"
     )

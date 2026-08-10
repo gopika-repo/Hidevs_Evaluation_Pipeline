@@ -113,6 +113,14 @@ class DatasetBuilder:
             else None
         )
 
+        # Handle retrieved chunks
+        if record.retrieved_chunks:
+            retrieved_chunks = [self._normalize_text(chunk) for chunk in record.retrieved_chunks if chunk]
+        elif retrieved_context:
+            retrieved_chunks = [retrieved_context]
+        else:
+            retrieved_chunks = None
+
         # Auto-tag conversation type
         conversation_type = self._classify(retrieved_context)
 
@@ -129,6 +137,7 @@ class DatasetBuilder:
             retrieved_context=retrieved_context,
             chat_history=chat_history,
             expected_intent=expected_intent,
+            retrieved_chunks=retrieved_chunks,
             timestamp=record.timestamp,
             conversation_type=conversation_type,
         )

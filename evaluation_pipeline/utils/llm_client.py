@@ -59,6 +59,7 @@ class LLMJudge:
             google_api_key=api_key,
             temperature=_DEFAULT_TEMPERATURE,
             max_output_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=60.0,  # Enforce 60.0 seconds hard timeout per API request
         )
         logger.info(
             "LLM Judge initialized: model=%s, temperature=%.1f",
