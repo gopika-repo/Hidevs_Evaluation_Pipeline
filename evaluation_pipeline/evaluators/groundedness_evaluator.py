@@ -460,10 +460,10 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Evidence Coverage={sub_scores.get('evidence_coverage', 0)}/5, "
-            f"Faithfulness={sub_scores.get('faithfulness_to_context', 0)}/5, "
-            f"Unsupported={sub_scores.get('unsupported_claims', 0)}/2.5, "
-            f"Contradictions={sub_scores.get('contradiction_detection', 0)}/2.5"
+            f"Sub-scores: Evidence Coverage={sub_scores.get('evidence_coverage', 0)}/7.0, "
+            f"Faithfulness={sub_scores.get('faithfulness_to_context', 0)}/7.0, "
+            f"Unsupported={sub_scores.get('unsupported_claims', 0)}/3.0, "
+            f"Contradictions={sub_scores.get('contradiction_detection', 0)}/3.0"
         )
 
         # External framework comparison
@@ -575,9 +575,9 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/5, "
-            f"Overconfidence={sub_scores.get('overconfidence', 0)}/5, "
-            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/5"
+            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/6.67, "
+            f"Overconfidence={sub_scores.get('overconfidence', 0)}/6.67, "
+            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/6.66"
         )
 
         return "\n\n".join(parts) if parts else "No feedback generated."
