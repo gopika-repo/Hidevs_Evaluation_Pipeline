@@ -101,68 +101,87 @@ class IntentEvaluator(BaseEvaluator):
 
     def evaluate(self, eval_input: EvaluationInput) -> EvaluationResult:
         """Run the LLM judge to evaluate intent understanding."""
-        logger.debug(
-            "Evaluating intent understanding for '%s'", eval_input.conversation_id
-        )
+        try:
+            logger.debug(
+                "Evaluating intent understanding for '%s'", eval_input.conversation_id
+            )
 
-        user_prompt = _build_user_prompt(eval_input)
-        parsed_json, raw_text = self._judge.call_with_json(
-            _SYSTEM_PROMPT, user_prompt
-        )
+            user_prompt = _build_user_prompt(eval_input)
+            parsed_json, raw_text = self._judge.call_with_json(
+                _SYSTEM_PROMPT,
+                user_prompt,
+                evaluator=self.name,
+                conversation_id=eval_input.conversation_id
+            )
 
-        # Extract and validate values
-        detected_true_intent = parsed_json.get("detected_true_intent", "ambiguous").strip().lower()
-        allowed_intents = {"personal", "technical", "platform", "out_of_scope", "ambiguous"}
-        if detected_true_intent not in allowed_intents:
-            detected_true_intent = "ambiguous"
+            if not parsed_json:
+                raise ValueError("Empty or invalid JSON response from intent judge.")
 
-        accuracy_raw = self._extract_score(parsed_json, "intent_accuracy")
-        clarification_raw = self._extract_score(parsed_json, "clarification_handling")
-        was_misclassified = bool(parsed_json.get("was_misclassified", False))
+            # Extract and validate values
+            detected_true_intent = parsed_json.get("detected_true_intent", "ambiguous").strip().lower()
+            allowed_intents = {"personal", "technical", "platform", "out_of_scope", "ambiguous"}
+            if detected_true_intent not in allowed_intents:
+                detected_true_intent = "ambiguous"
 
-        # Compute scoring
-        accuracy_score = (accuracy_raw / 5.0) * INTENT_ACCURACY_WEIGHT
-        clarification_score = (clarification_raw / 5.0) * CLARIFICATION_HANDLING_WEIGHT
-        misclassification_score = (0.0 if was_misclassified else 1.0) * MISCLASSIFICATION_WEIGHT
+            accuracy_raw = self._extract_score(parsed_json, "intent_accuracy")
+            clarification_raw = self._extract_score(parsed_json, "clarification_handling")
+            was_misclassified = bool(parsed_json.get("was_misclassified", False))
 
-        sub_scores = {
-            "intent_accuracy": round(accuracy_score, 2),
-            "clarification_handling": round(clarification_score, 2),
-            "misclassification_penalty": round(misclassification_score, 2),
-        }
+            # Compute scoring
+            accuracy_score = (accuracy_raw / 5.0) * INTENT_ACCURACY_WEIGHT
+            clarification_score = (clarification_raw / 5.0) * CLARIFICATION_HANDLING_WEIGHT
+            misclassification_score = (0.0 if was_misclassified else 1.0) * MISCLASSIFICATION_WEIGHT
 
-        # Calculate ground truth validation check if expected_intent is present
-        if eval_input.expected_intent:
-            expected = eval_input.expected_intent.strip().lower()
-            intent_match = (detected_true_intent == expected)
-            sub_scores["intent_match"] = 1.0 if intent_match else 0.0
+            sub_scores = {
+                "intent_accuracy": round(accuracy_score, 2),
+                "clarification_handling": round(clarification_score, 2),
+                "misclassification_penalty": round(misclassification_score, 2),
+            }
 
-        total_score = round(accuracy_score + clarification_score + misclassification_score, 2)
+            # Calculate ground truth validation check if expected_intent is present
+            if eval_input.expected_intent:
+                expected = eval_input.expected_intent.strip().lower()
+                intent_match = (detected_true_intent == expected)
+                sub_scores["intent_match"] = 1.0 if intent_match else 0.0
 
-        # Generate feedback
-        feedback_parts = [
-            f"Detected True Intent: {detected_true_intent}",
-            f"Expected Intent: {eval_input.expected_intent or 'Not provided'}",
-            f"Intent Accuracy: {accuracy_raw}/5 — {parsed_json.get('intent_accuracy', {}).get('reasoning', '')}",
-            f"Clarification Handling: {clarification_raw}/5 — {parsed_json.get('clarification_handling', {}).get('reasoning', '')}",
-            f"Was Misclassified: {'Yes' if was_misclassified else 'No'}",
-            f"Explanation: {parsed_json.get('explanation', '')}"
-        ]
-        feedback = "\n\n".join(feedback_parts)
+            total_score = round(accuracy_score + clarification_score + misclassification_score, 2)
 
-        # Flag if score is below 50% or if it was misclassified
-        flagged = total_score < (MAX_SCORE * 0.5) or was_misclassified
+            # Generate feedback
+            feedback_parts = [
+                f"Detected True Intent: {detected_true_intent}",
+                f"Expected Intent: {eval_input.expected_intent or 'Not provided'}",
+                f"Intent Accuracy: {accuracy_raw}/5 — {parsed_json.get('intent_accuracy', {}).get('reasoning', '')}",
+                f"Clarification Handling: {clarification_raw}/5 — {parsed_json.get('clarification_handling', {}).get('reasoning', '')}",
+                f"Was Misclassified: {'Yes' if was_misclassified else 'No'}",
+                f"Explanation: {parsed_json.get('explanation', '')}"
+            ]
+            feedback = "\n\n".join(feedback_parts)
 
-        return EvaluationResult(
-            evaluator_name=self.name,
-            conversation_id=eval_input.conversation_id,
-            score=total_score,
-            max_score=MAX_SCORE,
-            percentage=round((total_score / MAX_SCORE) * 100.0, 2),
-            sub_scores=sub_scores,
-            feedback=feedback,
-            flagged=flagged,
-        )
+            # Flag if score is below 50% or if it was misclassified
+            flagged = total_score < (MAX_SCORE * 0.5) or was_misclassified
+
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=total_score,
+                max_score=MAX_SCORE,
+                percentage=round((total_score / MAX_SCORE) * 100.0, 2),
+                sub_scores=sub_scores,
+                feedback=feedback,
+                flagged=flagged,
+            )
+        except Exception as exc:
+            logger.error("IntentEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=0.0,
+                max_score=MAX_SCORE,
+                status="failed",
+                sub_scores={},
+                feedback=f"Intent evaluation failed with error: {exc}",
+                flagged=True,
+            )
 
     @staticmethod
     def _extract_score(parsed: dict[str, Any], key: str, default: int = 3) -> int:

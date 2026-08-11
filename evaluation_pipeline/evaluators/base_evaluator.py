@@ -100,7 +100,7 @@ class BaseEvaluator(ABC):
                     evaluator_name=self.name,
                     conversation_id=eval_input.conversation_id,
                     score=0.0,
-                    max_score=1.0,
+                    max_score=20.0,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,

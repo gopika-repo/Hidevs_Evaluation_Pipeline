@@ -96,6 +96,8 @@ class ScoreAggregator:
                 total_memory += memory.score
                 memory_applicable_count += 1
 
+            # Deterministic Aggregation Policy:
+            # - overall_health_score is always normalized to 100: (raw_applicable_score / applicable_max_score) * 100.0
             raw_app_score = self.calculate_health_score(rq.score, gd.score, safety.score, intent_score, memory_val)
             overall_health_score = round((raw_app_score / max_health_convo) * 100.0, 2)
 

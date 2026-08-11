@@ -127,53 +127,71 @@ class ResponseQualityEvaluator(BaseEvaluator):
 
     def evaluate(self, eval_input: EvaluationInput) -> EvaluationResult:
         """Run the LLM judge and compute the response quality score."""
-
-        logger.debug(
-            "Evaluating response quality for '%s'", eval_input.conversation_id
-        )
-
-        # 1. Call the LLM judge
-        user_prompt = _build_user_prompt(eval_input)
-        parsed_json, raw_text = self._judge.call_with_json(
-            _SYSTEM_PROMPT, user_prompt
-        )
-
-        # 2. Validate and extract metric scores
-        metric_scores = self._extract_metric_scores(parsed_json)
-
-        # 3. Compute sub-scores: (raw_score / 5) * 5
-        sub_scores: dict[str, float] = {}
-        for metric in _METRICS:
-            raw = metric_scores[metric]["score"]
-            contribution = (raw / _MAX_METRIC_SCORE) * _METRIC_WEIGHT
-            sub_scores[metric] = round(contribution, 2)
-
-        # 4. Compute total score
-        total_score = round(sum(sub_scores.values()), 2)
-
-        # 5. Build feedback from the LLM's actual per-metric reasoning
-        feedback_parts: list[str] = []
-        for metric in _METRICS:
-            raw = metric_scores[metric]["score"]
-            reasoning = metric_scores[metric]["reasoning"]
-            feedback_parts.append(
-                f"{metric.capitalize()}: {raw}/5 — {reasoning}"
+        try:
+            logger.debug(
+                "Evaluating response quality for '%s'", eval_input.conversation_id
             )
-        feedback = "\n\n".join(feedback_parts)
 
-        # 6. Flag low-quality responses (below 50% of max)
-        flagged = total_score < (_MAX_TOTAL * 0.5)
+            # 1. Call the LLM judge
+            user_prompt = _build_user_prompt(eval_input)
+            parsed_json, raw_text = self._judge.call_with_json(
+                _SYSTEM_PROMPT,
+                user_prompt,
+                evaluator=self.name,
+                conversation_id=eval_input.conversation_id
+            )
 
-        return EvaluationResult(
-            evaluator_name=self.name,
-            conversation_id=eval_input.conversation_id,
-            score=total_score,
-            max_score=float(_MAX_TOTAL),
-            percentage=round((total_score / _MAX_TOTAL) * 100.0, 2),
-            sub_scores=sub_scores,
-            feedback=feedback,
-            flagged=flagged,
-        )
+            if not parsed_json:
+                raise ValueError("Empty or invalid JSON response from response quality judge.")
+
+            # 2. Validate and extract metric scores
+            metric_scores = self._extract_metric_scores(parsed_json)
+
+            # 3. Compute sub-scores: (raw_score / 5) * 5
+            sub_scores: dict[str, float] = {}
+            for metric in _METRICS:
+                raw = metric_scores[metric]["score"]
+                contribution = (raw / _MAX_METRIC_SCORE) * _METRIC_WEIGHT
+                sub_scores[metric] = round(contribution, 2)
+
+            # 4. Compute total score
+            total_score = round(sum(sub_scores.values()), 2)
+
+            # 5. Build feedback from the LLM's actual per-metric reasoning
+            feedback_parts: list[str] = []
+            for metric in _METRICS:
+                raw = metric_scores[metric]["score"]
+                reasoning = metric_scores[metric]["reasoning"]
+                feedback_parts.append(
+                    f"{metric.capitalize()}: {raw}/5 — {reasoning}"
+                )
+            feedback = "\n\n".join(feedback_parts)
+
+            # 6. Flag low-quality responses (below 50% of max)
+            flagged = total_score < (_MAX_TOTAL * 0.5)
+
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=total_score,
+                max_score=float(_MAX_TOTAL),
+                percentage=round((total_score / _MAX_TOTAL) * 100.0, 2),
+                sub_scores=sub_scores,
+                feedback=feedback,
+                flagged=flagged,
+            )
+        except Exception as exc:
+            logger.error("ResponseQualityEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=0.0,
+                max_score=float(_MAX_TOTAL),
+                status="failed",
+                sub_scores={},
+                feedback=f"Response quality evaluation failed with error: {exc}",
+                flagged=True,
+            )
 
     # ------------------------------------------------------------------
     # Helpers

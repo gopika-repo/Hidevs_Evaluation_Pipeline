@@ -24,34 +24,46 @@ You are a STRICT, expert evaluation judge assessing an AI assistant's memory and
 You must be critical and rigorous.
 
 Your task is to analyze the user query, Dave's response, and the conversation history (chat history) to evaluate three memory metrics:
-1. Memory Recall Accuracy: Whether Dave correctly recalls facts explicitly established in previous turns.
-2. Cross-Turn Consistency: Whether Dave's current response is consistent with previous turns (no contradictions).
-3. Memory Relevance & Non-Invention: Whether Dave uses only relevant facts, does not invent memories, does not attribute fake facts to the user, and does not use unrelated historical info.
+
+1. **Context Continuity** (1-5):
+   Evaluate whether Dave correctly uses relevant information from previous conversation turns when it is necessary to answer the current query.
+   - 5 = Correctly uses established preferences/context.
+   - 1 = Ignores required context.
+   
+2. **Information Retention** (1-5):
+   Evaluate whether Dave correctly remembers relevant facts/preferences/information explicitly provided earlier in the conversation.
+   Does he invent memories, remember things incorrectly, or unnecessarily ignore established information?
+   - 5 = Remembers all facts correctly.
+   - 1 = Invents or misremembers critical facts.
+
+3. **Consistency Across Turns** (1-5):
+   Evaluate whether Dave remains consistent with information and commitments established earlier in the conversation.
+   Does Dave contradict previous answers, change established facts without explanation, or act inconsistently with commitments?
+   - 5 = Completely consistent across all turns.
+   - 1 = Severe contradictions.
 
 CRITICAL INSTRUCTIONS:
 - First, determine if there is previous conversation history (chat history) containing turns relevant to memory.
-- If there is NO chat history, or the chat history does not establish any facts/context relevant to the current turn (e.g. it is just greetings, or completely unrelated chit-chat requiring no memory), you MUST set "is_applicable": false.
-- If "is_applicable" is true, you must analyze and provide the counts for the following metrics:
-  - `total_relevant_memory_facts`: Total number of facts established in previous turns that are relevant/needed for the current response.
-  - `correctly_recalled_relevant_facts`: Of those relevant facts, how many did Dave correctly recall and use?
-  - `total_memory_dependent_responses`: Total number of response statements/claims that depend on previous turns/history.
-  - `consistent_memory_dependent_responses`: Of those, how many are fully consistent with previous turns (not contradicting)?
-  - `total_memory_dependent_claims`: Total number of historical claims/references Dave made in the current response.
-  - `verified_relevant_memory_usage`: Of those, how many are verified, relevant, and not invented/misattributed?
+- If there is NO chat history, or the chat history does not establish any facts/context relevant to the current turn, you MUST set "is_applicable": false.
+- Otherwise, set "is_applicable": true.
 
-You must output a JSON object matching this schema:
+Return ONLY valid JSON matching this schema:
 {
   "is_applicable": bool,
   "reasoning_applicability": "explanation of why it is or is not applicable",
-  "total_relevant_memory_facts": int,
-  "correctly_recalled_relevant_facts": int,
-  "reasoning_recall": "detailed reasoning for recall accuracy",
-  "total_memory_dependent_responses": int,
-  "consistent_memory_dependent_responses": int,
-  "reasoning_consistency": "detailed reasoning for consistency",
-  "total_memory_dependent_claims": int,
-  "verified_relevant_memory_usage": int,
-  "reasoning_relevance": "detailed reasoning for relevance & non-invention"
+  "context_continuity": {
+    "score": <1-5>,
+    "reasoning": "detailed reasoning for context continuity score"
+  },
+  "information_retention": {
+    "score": <1-5>,
+    "reasoning": "detailed reasoning for information retention score"
+  },
+  "consistency_across_turns": {
+    "score": <1-5>,
+    "reasoning": "detailed reasoning for consistency across turns score"
+  },
+  "overall_reasoning": "summary reasoning"
 }
 """
 
@@ -82,103 +94,130 @@ class MemoryEvaluator(BaseEvaluator):
                 applicable=False,
                 status="not_applicable",
                 percentage=None,
-                sub_scores={},
+                sub_scores={
+                    "context_continuity": None,
+                    "information_retention": None,
+                    "consistency_across_turns": None
+                },
                 feedback="No prior conversation history available for memory evaluation",
                 flagged=False
             )
 
         # 2. Call LLM Judge
-        user_prompt = (
-            f"## Conversation History (Prior Turns)\n{eval_input.chat_history}\n\n"
-            f"## Current User Query\n{eval_input.user_query}\n\n"
-            f"## Current Assistant Response (Dave)\n{eval_input.dave_response}\n"
-        )
+        try:
+            user_prompt = (
+                f"## Conversation History (Prior Turns)\n{eval_input.chat_history}\n\n"
+                f"## Current User Query\n{eval_input.user_query}\n\n"
+                f"## Current Assistant Response (Dave)\n{eval_input.dave_response}\n"
+            )
 
-        parsed_json, raw_text = self._judge.call_with_json(_SYSTEM_PROMPT, user_prompt)
+            parsed_json, raw_text = self._judge.call_with_json(
+                _SYSTEM_PROMPT,
+                user_prompt,
+                evaluator=self.name,
+                conversation_id=eval_input.conversation_id
+            )
 
-        is_applicable = parsed_json.get("is_applicable", True)
-        if not is_applicable:
+            if not parsed_json:
+                raise ValueError("Empty or invalid JSON response from memory judge.")
+
+            is_applicable = parsed_json.get("is_applicable", True)
+            if not is_applicable:
+                return EvaluationResult(
+                    evaluator_name=self.name,
+                    conversation_id=eval_input.conversation_id,
+                    score=None,
+                    max_score=20.0,
+                    applicable=False,
+                    status="not_applicable",
+                    percentage=None,
+                    sub_scores={
+                        "context_continuity": None,
+                        "information_retention": None,
+                        "consistency_across_turns": None
+                    },
+                    feedback=parsed_json.get("reasoning_applicability", "No prior conversation history available for memory evaluation"),
+                    flagged=False
+                )
+
+            # 3. Extract scores
+            context_raw = self._extract_score(parsed_json, "context_continuity", default=3)
+            retention_raw = self._extract_score(parsed_json, "information_retention", default=3)
+            consistency_raw = self._extract_score(parsed_json, "consistency_across_turns", default=3)
+
+            # 4. Apply Formulas
+            # Metric 1: Context Continuity (max 8)
+            recall_score = (context_raw / 5.0) * 8.0
+            # Metric 2: Information Retention (max 6)
+            relevance_score = (retention_raw / 5.0) * 6.0
+            # Metric 3: Consistency Across Turns (max 6)
+            consistency_score = (consistency_raw / 5.0) * 6.0
+
+            total_score = round(recall_score + relevance_score + consistency_score, 2)
+            percentage = round((total_score / 20.0) * 100.0, 2)
+
+            sub_scores = {
+                "context_continuity": round(recall_score, 2),
+                "information_retention": round(relevance_score, 2),
+                "consistency_across_turns": round(consistency_score, 2),
+            }
+
+            # Build feedback lines from reasoning fields
+            feedback_lines = [
+                f"Applicability check: {parsed_json.get('reasoning_applicability', '')}",
+                f"Context Continuity: {sub_scores['context_continuity']}/8.0 ({context_raw}/5). Reasoning: {parsed_json.get('context_continuity', {}).get('reasoning', '') if isinstance(parsed_json.get('context_continuity'), dict) else ''}",
+                f"Information Retention: {sub_scores['information_retention']}/6.0 ({retention_raw}/5). Reasoning: {parsed_json.get('information_retention', {}).get('reasoning', '') if isinstance(parsed_json.get('information_retention'), dict) else ''}",
+                f"Consistency Across Turns: {sub_scores['consistency_across_turns']}/6.0 ({consistency_raw}/5). Reasoning: {parsed_json.get('consistency_across_turns', {}).get('reasoning', '') if isinstance(parsed_json.get('consistency_across_turns'), dict) else ''}",
+                f"Total Memory & Continuity Score: {total_score}/20.0"
+            ]
+            feedback = "\n\n".join(feedback_lines)
+
+            # Flag if overall score is less than 50%
+            flagged = total_score < 10.0
+
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=total_score,
+                max_score=20.0,
+                applicable=True,
+                status="evaluated",
+                percentage=percentage,
+                sub_scores=sub_scores,
+                feedback=feedback,
+                flagged=flagged
+            )
+        except Exception as exc:
+            logger.error("MemoryEvaluator failed for %s: %s", eval_input.conversation_id, exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=20.0,
                 applicable=False,
+                status="failed",
                 percentage=None,
-                sub_scores={},
-                feedback=parsed_json.get("reasoning_applicability", "No prior conversation history available for memory evaluation"),
-                flagged=False
+                sub_scores={
+                    "context_continuity": None,
+                    "information_retention": None,
+                    "consistency_across_turns": None
+                },
+                feedback=f"Memory evaluation failed with error: {exc}",
+                flagged=True,
             )
 
-        # 3. Extract counts
-        total_facts = max(int(parsed_json.get("total_relevant_memory_facts", 0)), 0)
-        recalled_facts = max(int(parsed_json.get("correctly_recalled_relevant_facts", 0)), 0)
-        
-        total_responses = max(int(parsed_json.get("total_memory_dependent_responses", 0)), 0)
-        consistent_responses = max(int(parsed_json.get("consistent_memory_dependent_responses", 0)), 0)
-        
-        total_claims = max(int(parsed_json.get("total_memory_dependent_claims", 0)), 0)
-        verified_usage = max(int(parsed_json.get("verified_relevant_memory_usage", 0)), 0)
-
-        # Clamp recalled facts to total facts
-        if recalled_facts > total_facts:
-            recalled_facts = total_facts
-        if consistent_responses > total_responses:
-            consistent_responses = total_responses
-        if verified_usage > total_claims:
-            verified_usage = total_claims
-
-        # 4. Apply Formulas
-        # Metric 1: Recall Accuracy (max 8)
-        if total_facts > 0:
-            recall_score = (recalled_facts / total_facts) * 8.0
+    @staticmethod
+    def _extract_score(parsed: dict[str, Any], key: str, default: int = 3) -> int:
+        """Safely extract a 1–5 integer score from a parsed JSON entry."""
+        entry = parsed.get(key)
+        if entry is None:
+            return default
+        if isinstance(entry, dict):
+            raw = entry.get("score", default)
         else:
-            # If no memory facts exist, but judge marked applicable, default to perfect
-            recall_score = 8.0
-
-        # Metric 2: Consistency (max 6)
-        if total_responses > 0:
-            consistency_score = (consistent_responses / total_responses) * 6.0
-        else:
-            consistency_score = 6.0
-
-        # Metric 3: Relevance & Non-Invention (max 6)
-        if total_claims > 0:
-            relevance_score = (verified_usage / total_claims) * 6.0
-        else:
-            relevance_score = 6.0
-
-        total_score = round(recall_score + consistency_score + relevance_score, 2)
-        percentage = round((total_score / 20.0) * 100.0, 2)
-
-        sub_scores = {
-            "memory_recall_accuracy": round(recall_score, 2),
-            "cross_turn_consistency": round(consistency_score, 2),
-            "memory_relevance_non_invention": round(relevance_score, 2),
-        }
-
-        # Build feedback lines from reasoning fields
-        feedback_lines = [
-            f"Applicability check: {parsed_json.get('reasoning_applicability', '')}",
-            f"Memory Recall Accuracy: {sub_scores['memory_recall_accuracy']}/8.0 ({recalled_facts}/{total_facts} facts correctly recalled). Reasoning: {parsed_json.get('reasoning_recall', '')}",
-            f"Cross-Turn Consistency: {sub_scores['cross_turn_consistency']}/6.0 ({consistent_responses}/{total_responses} consistent responses). Reasoning: {parsed_json.get('reasoning_consistency', '')}",
-            f"Memory Relevance & Non-Invention: {sub_scores['memory_relevance_non_invention']}/6.0 ({verified_usage}/{total_claims} verified claims). Reasoning: {parsed_json.get('reasoning_relevance', '')}",
-            f"Total Memory & Continuity Score: {total_score}/20.0"
-        ]
-        feedback = "\n\n".join(feedback_lines)
-
-        # Flag if overall score is less than 50% or if there are contradictions
-        flagged = total_score < 10.0 or consistent_responses < total_responses
-
-        return EvaluationResult(
-            evaluator_name=self.name,
-            conversation_id=eval_input.conversation_id,
-            score=total_score,
-            max_score=20.0,
-            applicable=True,
-            status="success",
-            percentage=percentage,
-            sub_scores=sub_scores,
-            feedback=feedback,
-            flagged=flagged
-        )
+            raw = entry
+        try:
+            score = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return min(max(score, 1), 5)

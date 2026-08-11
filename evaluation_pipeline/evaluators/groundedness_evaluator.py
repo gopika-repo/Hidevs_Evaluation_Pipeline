@@ -50,47 +50,32 @@ You are a STRICT, expert evaluation judge specialising in groundedness
 and hallucination detection. You must be rigorous — penalise any
 unsupported or fabricated claim, no matter how minor.
 
-TASK:
-Given an AI assistant's response and the retrieved source context,
-you must:
+You will evaluate the response on three metrics, each scored 1–5 (5 = Excellent, 1 = Very Poor):
 
-1. **Extract every distinct factual claim** made in the response.
-   A "claim" is any statement asserting a fact, number, process, URL,
-   name, or specific detail. List each claim separately.
+1. **Internal Consistency** (1-5):
+   Does the response contradict itself? Are all statements logically
+   compatible with each other and with the conversation history?
+   | 5 = Fully consistent | 1 = Contains clear self-contradictions |
 
-2. For each claim, classify it as:
-   - "supported" — clearly backed by the source context
-   - "unsupported" — not present in the context (neither confirmed nor denied)
-   - "contradicted" — directly contradicts something in the context
+2. **Overconfidence** (1-5):
+   Does the response present uncertain or unverifiable information as if
+   it were confirmed fact? Does it appropriately hedge when making claims
+   that cannot be independently verified?
+   | 5 = Appropriately hedged | 1 = Presents speculation as fact |
 
-3. **Score Faithfulness** (1–5): Overall, how faithful is the response
-   to the source context?
-   | Score | Meaning |
-   |-------|---------|
-   | 1 | Mostly fabricated; majority of claims unsupported |
-   | 2 | Several significant unsupported claims |
-   | 3 | Some unsupported claims but core is grounded |
-   | 4 | Nearly all claims supported; minor gaps only |
-   | 5 | Every claim is fully supported by the context |
+3. **Hallucination Risk** (1-5):
+   Assess whether this response presents claims that are NOT grounded in the retrieved source context,
+   or if it contradicts anything in the retrieved source context. Does it
+   fabricate specific details (names, numbers, URLs, dates) that seem
+   invented or unsupported by the context?
+   | 5 = Fully grounded in context | 1 = Clearly fabricated or contains contradicted content |
 
-IMPORTANT:
-- Be exhaustive when extracting claims — do NOT skip minor details.
-- A claim is "unsupported" even if it is likely true but not in the context.
-- Check numbers, dates, URLs, and proper nouns with extra care.
-- Include internal metadata, config variables, or system details that
-  appear in the response — these are often leaks and should be flagged.
-
-Return ONLY valid JSON with this exact structure:
+Return your evaluation as a JSON object with EXACTLY this structure:
 {
-  "claims": [
-    {"claim": "<exact claim text>", "status": "supported|unsupported|contradicted", "reasoning": "<why>"}
-  ],
-  "total_claims": <int>,
-  "supported_claims": <int>,
-  "unsupported_claims": <int>,
-  "contradictions": <int>,
-  "faithfulness": {"score": <1-5>, "reasoning": "<overall assessment>"},
-  "overall_reasoning": "<summary of groundedness assessment>"
+  "internal_consistency": {"score": <1-5>, "reasoning": "<specific assessment>"},
+  "overconfidence": {"score": <1-5>, "reasoning": "<specific assessment>"},
+  "hallucination_risk": {"score": <1-5>, "reasoning": "<specific assessment>"},
+  "overall_reasoning": "<summary>"
 }
 """
 
@@ -182,32 +167,53 @@ Score each dimension 1–5 (5 = good, no issues). Return ONLY valid JSON.
 # ---------------------------------------------------------------------------
 
 def _run_trulens_groundedness(
-    context: str, response: str
+    context: str, response: str, conversation_id: str = "unknown"
 ) -> dict[str, Any]:
     """
-    Run TruLens groundedness evaluation.
+    Run TruLens groundedness evaluation using native Google provider with controlled concurrency, retries, and timeout.
     """
     if not context or not context.strip():
         return {
             "status": "not_applicable",
             "reason": "No retrieved context available"
         }
+    
+    from evaluation_pipeline.utils.concurrency import controlled_concurrency
+    from evaluation_pipeline.utils.retry_utils import execute_with_retry
+    import os
+    import concurrent.futures
+
+    trulens_timeout = float(os.getenv("TRULENS_TIMEOUT", "45.0"))
+
+    def _call_trulens():
+        from trulens.providers.google import Google
+        model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
+        api_key = os.getenv("GOOGLE_API_KEY")
+        provider = Google(model_engine=model_name, api_key=api_key)
+        
+        def _invoke():
+            with controlled_concurrency("groundedness", "TruLens", conversation_id):
+                score = provider.groundedness_measure_with_cot_reasons(
+                    source=context,
+                    statement=response,
+                )
+                if isinstance(score, tuple):
+                    return float(score[0])
+                return float(score)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner_exec:
+            fut = inner_exec.submit(_invoke)
+            return fut.result(timeout=trulens_timeout)
+
     try:
-        from trulens.providers.litellm import LiteLLM
-        import os
-
-        model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-        provider = LiteLLM(model_engine=f"gemini/{model_name}")
-
-        score = provider.groundedness_measure_with_cot_reasons(
-            source=context,
-            statement=response,
+        score_val = execute_with_retry(
+            _call_trulens,
+            evaluator="groundedness",
+            framework="TruLens",
+            conversation_id=conversation_id,
+            max_retries=3,
+            initial_delay=2.0
         )
-        if isinstance(score, tuple):
-            score_val = float(score[0])
-        else:
-            score_val = float(score)
-
         return {
             "status": "success",
             "score": score_val
@@ -221,37 +227,68 @@ def _run_trulens_groundedness(
 
 
 def _run_deepeval_faithfulness(
-    user_query: str, response: str, context: str
+    user_query: str, response: str, context: str, conversation_id: str = "unknown"
 ) -> dict[str, Any]:
     """
-    Run DeepEval faithfulness evaluation.
+    Run DeepEval faithfulness evaluation using GeminiModel with controlled concurrency, retries, and timeout.
     """
     if not context or not context.strip():
         return {
             "status": "not_applicable",
             "reason": "No retrieved context available"
         }
-    try:
+    
+    from evaluation_pipeline.utils.concurrency import controlled_concurrency
+    from evaluation_pipeline.utils.retry_utils import execute_with_retry
+    import os
+    import concurrent.futures
+
+    deepeval_timeout = float(os.getenv("DEEPEVAL_TIMEOUT", "45.0"))
+
+    def _call_deepeval():
         from deepeval.metrics import FaithfulnessMetric
         from deepeval.test_case import LLMTestCase
-        import os
+        from deepeval.models import GeminiModel
+        
+        model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
+        api_key = os.getenv("GOOGLE_API_KEY")
 
-        model_name = os.getenv("GEMINI_MODEL_NAME", "gemini-1.5-flash")
-
+        model = GeminiModel(
+            model=model_name,
+            api_key=api_key,
+            temperature=0.0
+        )
         test_case = LLMTestCase(
             input=user_query,
             actual_output=response,
             retrieval_context=[context],
         )
-
         metric = FaithfulnessMetric(
-            model=f"gemini/{model_name}",
+            model=model,
             threshold=0.7,
         )
-        metric.measure(test_case)
+
+        def _invoke():
+            with controlled_concurrency("groundedness", "DeepEval", conversation_id):
+                metric.measure(test_case)
+                return float(metric.score)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner_exec:
+            fut = inner_exec.submit(_invoke)
+            return fut.result(timeout=deepeval_timeout)
+
+    try:
+        score_val = execute_with_retry(
+            _call_deepeval,
+            evaluator="groundedness",
+            framework="DeepEval",
+            conversation_id=conversation_id,
+            max_retries=3,
+            initial_delay=2.0
+        )
         return {
             "status": "success",
-            "score": float(metric.score)
+            "score": score_val
         }
     except Exception as exc:
         logger.warning("DeepEval faithfulness evaluation failed: %s", exc)
@@ -324,41 +361,68 @@ class GroundednessEvaluator(BaseEvaluator):
                 self._run_custom_context_backed_judge, eval_input
             )
             future_trulens = executor.submit(
-                _run_trulens_groundedness, context, response
+                _run_trulens_groundedness, context, response, eval_input.conversation_id
             )
             future_deepeval = executor.submit(
                 _run_deepeval_faithfulness,
                 eval_input.user_query,
                 response,
                 context,
+                eval_input.conversation_id
             )
 
-            # Collect results
-            parsed_json, raw_text = future_custom.result()
-            trulens_res = future_trulens.result()
-            deepeval_res = future_deepeval.result()
+            # Collect results safely
+            try:
+                parsed_json, raw_text = future_custom.result()
+            except Exception as exc:
+                logger.error("Groundedness custom judge failed for %s: %s", eval_input.conversation_id, exc)
+                parsed_json = {}
+                raw_text = ""
+                
+            try:
+                trulens_res = future_trulens.result()
+            except Exception as exc:
+                logger.error("Groundedness TruLens failed for %s: %s", eval_input.conversation_id, exc)
+                trulens_res = {"status": "failed", "error": str(exc)}
+                
+            try:
+                deepeval_res = future_deepeval.result()
+            except Exception as exc:
+                logger.error("Groundedness DeepEval failed for %s: %s", eval_input.conversation_id, exc)
+                deepeval_res = {"status": "failed", "error": str(exc)}
+
+        # --- Check if custom judge failed ----
+        if not parsed_json:
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=0.0,
+                max_score=_MAX_SCORE_CONTEXT_BACKED,
+                status="failed",
+                sub_scores={},
+                feedback="Groundedness custom judge call failed.",
+                flagged=True,
+            )
 
         # --- Compute scores from custom judge ----
-        total_claims = max(parsed_json.get("total_claims", 1), 1)  # avoid div/0
-        supported = parsed_json.get("supported_claims", 0)
-        unsupported = parsed_json.get("unsupported_claims", 0)
-        contradictions = parsed_json.get("contradictions", 0)
-
-        faithfulness_raw = self._extract_score(
-            parsed_json, "faithfulness", default=3
+        consistency_raw = self._extract_score(
+            parsed_json, "internal_consistency", default=3
+        )
+        overconfidence_raw = self._extract_score(
+            parsed_json, "overconfidence", default=3
+        )
+        hallucination_raw = self._extract_score(
+            parsed_json, "hallucination_risk", default=3
         )
 
-        # Apply the exact formulas (Phase 1 20-point max)
-        evidence_coverage = (supported / total_claims) * 7.0
-        faithfulness_score = (faithfulness_raw / 5.0) * 7.0
-        unsupported_score = (1.0 - (unsupported / total_claims)) * 3.0
-        contradiction_score = (1.0 - (contradictions / total_claims)) * 3.0
+        consistency_score = (consistency_raw / 5.0) * 6.0
+        overconfidence_score = (overconfidence_raw / 5.0) * 6.0
+        hallucination_score = (hallucination_raw / 5.0) * 8.0
 
         sub_scores: dict[str, float] = {
-            "evidence_coverage": round(evidence_coverage, 2),
-            "faithfulness_to_context": round(faithfulness_score, 2),
-            "unsupported_claims": round(unsupported_score, 2),
-            "contradiction_detection": round(contradiction_score, 2),
+            "internal_consistency": round(consistency_score, 2),
+            "overconfidence": round(overconfidence_score, 2),
+            "hallucination_risk": round(hallucination_score, 2),
         }
 
         # Store comparison details from external frameworks
@@ -379,10 +443,9 @@ class GroundednessEvaluator(BaseEvaluator):
             sub_scores["deepeval_reason"] = deepeval_res["reason"]
 
         total_score = round(
-            evidence_coverage
-            + faithfulness_score
-            + unsupported_score
-            + contradiction_score,
+            consistency_score
+            + overconfidence_score
+            + hallucination_score,
             2,
         )
 
@@ -391,8 +454,8 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, sub_scores
         )
 
-        # Flag if score < 50% or any contradictions found
-        flagged = total_score < (_MAX_SCORE_CONTEXT_BACKED * 0.5) or contradictions > 0
+        # Flag if score < 50%
+        flagged = total_score < (_MAX_SCORE_CONTEXT_BACKED * 0.5)
 
         return EvaluationResult(
             evaluator_name=self.name,
@@ -423,7 +486,10 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         return self._judge.call_with_json(
-            _SYSTEM_PROMPT_CONTEXT_BACKED, user_prompt
+            _SYSTEM_PROMPT_CONTEXT_BACKED,
+            user_prompt,
+            evaluator=self.name,
+            conversation_id=eval_input.conversation_id
         )
 
     @staticmethod
@@ -434,39 +500,29 @@ class GroundednessEvaluator(BaseEvaluator):
         """Build human-readable feedback from the judge's analysis."""
         parts: list[str] = []
 
+        # Per-metric reasoning from LLM
+        for metric_key, label in [
+            ("internal_consistency", "Internal Consistency"),
+            ("overconfidence", "Overconfidence"),
+            ("hallucination_risk", "Hallucination Risk"),
+        ]:
+            entry = parsed.get(metric_key, {})
+            if isinstance(entry, dict) and entry.get("reasoning"):
+                parts.append(
+                    f"{label} ({entry.get('score', '?')}/5): "
+                    f"{entry['reasoning']}"
+                )
+
         # Overall reasoning from LLM
         overall = parsed.get("overall_reasoning", "")
         if overall:
             parts.append(f"Overall Assessment: {overall}")
 
-        # Faithfulness reasoning
-        faith = parsed.get("faithfulness", {})
-        if isinstance(faith, dict) and faith.get("reasoning"):
-            parts.append(
-                f"Faithfulness ({faith.get('score', '?')}/5): "
-                f"{faith['reasoning']}"
-            )
-
-        # Claim-by-claim details (show unsupported/contradicted)
-        claims = parsed.get("claims", [])
-        problem_claims = [
-            c for c in claims
-            if isinstance(c, dict) and c.get("status") in ("unsupported", "contradicted")
-        ]
-        if problem_claims:
-            parts.append("Problematic Claims:")
-            for c in problem_claims:
-                parts.append(
-                    f"  [{c.get('status', '?').upper()}] "
-                    f"\"{c.get('claim', '?')}\" — {c.get('reasoning', '')}"
-                )
-
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Evidence Coverage={sub_scores.get('evidence_coverage', 0)}/7.0, "
-            f"Faithfulness={sub_scores.get('faithfulness_to_context', 0)}/7.0, "
-            f"Unsupported={sub_scores.get('unsupported_claims', 0)}/3.0, "
-            f"Contradictions={sub_scores.get('contradiction_detection', 0)}/3.0"
+            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/6.0, "
+            f"Overconfidence={sub_scores.get('overconfidence', 0)}/6.0, "
+            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/8.0"
         )
 
         # External framework comparison
@@ -515,8 +571,23 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         parsed_json, raw_text = self._judge.call_with_json(
-            _SYSTEM_PROMPT_CONTEXT_FREE, user_prompt
+            _SYSTEM_PROMPT_CONTEXT_FREE,
+            user_prompt,
+            evaluator=self.name,
+            conversation_id=eval_input.conversation_id
         )
+
+        if not parsed_json:
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=0.0,
+                max_score=_MAX_SCORE_CONTEXT_FREE,
+                status="failed",
+                sub_scores={},
+                feedback="Groundedness custom judge call failed.",
+                flagged=True,
+            )
 
         # Extract scores
         consistency_raw = self._extract_score(
@@ -529,10 +600,10 @@ class GroundednessEvaluator(BaseEvaluator):
             parsed_json, "hallucination_risk", default=3
         )
 
-        # Apply formulas: (score / 5) × category_max (6.67, 6.67, 6.66)
-        consistency_score = (consistency_raw / 5.0) * 6.67
-        overconfidence_score = (overconfidence_raw / 5.0) * 6.67
-        hallucination_score = (hallucination_raw / 5.0) * 6.66
+        # Apply formulas: (score / 5) × category_max (6, 6, 8)
+        consistency_score = (consistency_raw / 5.0) * 6.0
+        overconfidence_score = (overconfidence_raw / 5.0) * 6.0
+        hallucination_score = (hallucination_raw / 5.0) * 8.0
 
         sub_scores: dict[str, float] = {
             "internal_consistency": round(consistency_score, 2),
@@ -593,9 +664,9 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # Sub-score summary
         parts.append(
-            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/6.67, "
-            f"Overconfidence={sub_scores.get('overconfidence', 0)}/6.67, "
-            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/6.66"
+            f"Sub-scores: Consistency={sub_scores.get('internal_consistency', 0)}/6.0, "
+            f"Overconfidence={sub_scores.get('overconfidence', 0)}/6.0, "
+            f"Hallucination Risk={sub_scores.get('hallucination_risk', 0)}/8.0"
         )
 
         # External framework comparison

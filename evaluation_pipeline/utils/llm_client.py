@@ -22,8 +22,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 logger = logging.getLogger(__name__)
 
+# Environment Validation
+_api_key_configured = "yes" if os.getenv("GOOGLE_API_KEY") else "no"
+_gemini_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
+print(f"Gemini API key configured: {_api_key_configured}", flush=True)
+print(f"Gemini model: {_gemini_model}", flush=True)
+
 # Defaults
-_DEFAULT_MODEL = "gemini-1.5-flash"
+_DEFAULT_MODEL = "gemini-3.5-flash"
 _DEFAULT_TEMPERATURE = 0.0
 _DEFAULT_MAX_TOKENS = 4096
 _MAX_RETRIES = 3
@@ -35,7 +41,7 @@ class LLMJudge:
     LLM-as-a-judge client backed by Google Gemini via LangChain.
 
     Initializes from environment variables:
-      - GEMINI_MODEL_NAME  (default: gemini-1.5-flash)
+      - GEMINI_MODEL_NAME  (default: gemini-3.5-flash)
       - GOOGLE_API_KEY     (required)
 
     Usage
@@ -54,17 +60,19 @@ class LLMJudge:
                 "Set it in your .env file or export it in your shell."
             )
 
+        gemini_timeout = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
         self.llm = ChatGoogleGenerativeAI(
             model=self.model_name,
             google_api_key=api_key,
             temperature=_DEFAULT_TEMPERATURE,
             max_output_tokens=_DEFAULT_MAX_TOKENS,
-            timeout=60.0,  # Enforce 60.0 seconds hard timeout per API request
+            timeout=gemini_timeout,
         )
         logger.info(
-            "LLM Judge initialized: model=%s, temperature=%.1f",
+            "LLM Judge initialized: model=%s, temperature=%.1f, timeout=%.1fs",
             self.model_name,
             _DEFAULT_TEMPERATURE,
+            gemini_timeout,
         )
 
     def _convert_to_string(self, content: Any) -> str:
@@ -87,19 +95,51 @@ class LLMJudge:
             return content
         return str(content)
 
-    def _log_to_file(self, system_prompt: str, user_prompt: str, response_text: str) -> None:
-        """Log the raw LLM prompt and response to a local log file."""
+    def _log_to_file(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_text: str,
+        evaluator: str = "unknown",
+        conversation_id: str = "unknown",
+        duration: float = 0.0,
+        status: str = "success",
+        error_type: str | None = None,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None
+    ) -> None:
+        """Log LLM call metadata securely, with optional raw logging if configured."""
         log_dir = "logs"
         os.makedirs(log_dir, exist_ok=True)
         log_file = os.path.join(log_dir, "llm_calls.log")
         timestamp = datetime.now(timezone.utc).isoformat()
+        enable_raw = os.getenv("ENABLE_RAW_LLM_LOGS", "false").lower() == "true"
+        
         try:
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"=== LLM CALL AT {timestamp} ===\n")
+                f.write(f"CONVERSATION ID: {conversation_id}\n")
+                f.write(f"EVALUATOR: {evaluator}\n")
                 f.write(f"MODEL: {self.model_name}\n")
-                f.write(f"--- SYSTEM PROMPT ---\n{system_prompt}\n")
-                f.write(f"--- USER PROMPT ---\n{user_prompt}\n")
-                f.write(f"--- RESPONSE ---\n{response_text}\n")
+                f.write(f"DURATION: {duration:.3f}s\n")
+                f.write(f"STATUS: {status}\n")
+                f.write(f"ERROR TYPE: {error_type or 'None'}\n")
+                f.write(f"INPUT TOKENS: {input_tokens if input_tokens is not None else 'N/A'}\n")
+                f.write(f"OUTPUT TOKENS: {output_tokens if output_tokens is not None else 'N/A'}\n")
+                
+                if enable_raw:
+                    def redact(text: str) -> str:
+                        key = os.getenv("GOOGLE_API_KEY")
+                        if key:
+                            text = text.replace(key, "[REDACTED_API_KEY]")
+                        # Redact credentials/URIs
+                        text = re.sub(r"sk-[a-zA-Z0-9]{20,}", "[REDACTED_API_KEY]", text)
+                        text = re.sub(r"mongodb(?:\+srv)?://\S+", "[REDACTED_MONGO_URI]", text)
+                        return text
+                    
+                    f.write(f"--- SYSTEM PROMPT ---\n{redact(system_prompt)}\n")
+                    f.write(f"--- USER PROMPT ---\n{redact(user_prompt)}\n")
+                    f.write(f"--- RESPONSE ---\n{redact(response_text)}\n")
                 f.write("=" * 80 + "\n\n")
         except Exception as e:
             logger.warning("Failed to write to raw LLM log file: %s", e)
@@ -112,120 +152,126 @@ class LLMJudge:
         self,
         system_prompt: str,
         user_prompt: str,
+        evaluator: str = "unknown",
+        conversation_id: str = "unknown",
     ) -> tuple[dict[str, Any], str]:
         """
         Call the LLM and parse structured JSON from its response.
-
-        Parameters
-        ----------
-        system_prompt : str
-            System-level instructions for the judge.
-        user_prompt : str
-            The evaluation prompt with conversation data.
-
-        Returns
-        -------
-        tuple[dict, str]
-            (parsed_json, raw_response_text)
-
-        Raises
-        ------
-        ValueError
-            If JSON cannot be extracted after all retries.
-        RuntimeError
-            If the LLM API call fails after all retries.
         """
+        from evaluation_pipeline.utils.concurrency import controlled_concurrency
+        from evaluation_pipeline.utils.retry_utils import execute_with_retry
+
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
-        last_error: Exception | None = None
+        def _invoke_api():
+            with controlled_concurrency(evaluator, "Gemini API", conversation_id):
+                return self.llm.invoke(messages)
 
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                response = self.llm.invoke(messages)
-                raw_text = self._convert_to_string(response.content)
+        start_time = time.time()
+        try:
+            response = execute_with_retry(
+                _invoke_api,
+                evaluator=evaluator,
+                framework="Gemini API",
+                conversation_id=conversation_id,
+                max_retries=_MAX_RETRIES,
+                initial_delay=_RETRY_BACKOFF_BASE
+            )
+            raw_text = self._convert_to_string(response.content)
+            
+            input_tokens = None
+            output_tokens = None
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                input_tokens = response.usage_metadata.get("input_tokens")
+                output_tokens = response.usage_metadata.get("output_tokens")
+            elif hasattr(response, "response_metadata") and response.response_metadata:
+                token_usage = response.response_metadata.get("token_usage", {})
+                if token_usage:
+                    input_tokens = token_usage.get("prompt_tokens")
+                    output_tokens = token_usage.get("completion_tokens")
 
-                logger.debug(
-                    "LLM response (attempt %d, %d chars): %s...",
-                    attempt,
-                    len(raw_text),
-                    raw_text[:200],
-                )
-
-                self._log_to_file(system_prompt, user_prompt, raw_text)
-                parsed = self._extract_json(raw_text)
-                return parsed, raw_text
-
-            except (json.JSONDecodeError, ValueError) as exc:
-                logger.warning(
-                    "JSON parse failed on attempt %d/%d: %s",
-                    attempt,
-                    _MAX_RETRIES,
-                    exc,
-                )
-                last_error = exc
-                # Retry with backoff — LLM may produce valid JSON next time
-                if attempt < _MAX_RETRIES:
-                    sleep_time = _RETRY_BACKOFF_BASE ** attempt
-                    logger.info("Retrying in %.1fs...", sleep_time)
-                    time.sleep(sleep_time)
-
-            except Exception as exc:
-                logger.warning(
-                    "LLM API call failed on attempt %d/%d: %s",
-                    attempt,
-                    _MAX_RETRIES,
-                    exc,
-                )
-                last_error = exc
-                if attempt < _MAX_RETRIES:
-                    sleep_time = _RETRY_BACKOFF_BASE ** attempt
-                    logger.info("Retrying in %.1fs...", sleep_time)
-                    time.sleep(sleep_time)
-
-        raise RuntimeError(
-            f"LLM call failed after {_MAX_RETRIES} attempts. Last error: {last_error}"
-        )
+            duration = time.time() - start_time
+            self._log_to_file(
+                system_prompt, user_prompt, raw_text,
+                evaluator=evaluator, conversation_id=conversation_id,
+                duration=duration, status="success",
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
+            parsed = self._extract_json(raw_text)
+            return parsed, raw_text
+        except Exception as exc:
+            duration = time.time() - start_time
+            self._log_to_file(
+                system_prompt, user_prompt, "",
+                evaluator=evaluator, conversation_id=conversation_id,
+                duration=duration, status="failed", error_type=exc.__class__.__name__
+            )
+            raise exc
 
     def call_raw(
         self,
         system_prompt: str,
         user_prompt: str,
+        evaluator: str = "unknown",
+        conversation_id: str = "unknown",
     ) -> str:
         """
         Call the LLM and return the raw text response (no JSON parsing).
-
-        Useful when you need free-form text rather than structured output.
         """
+        from evaluation_pipeline.utils.concurrency import controlled_concurrency
+        from evaluation_pipeline.utils.retry_utils import execute_with_retry
+
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt),
         ]
 
-        last_error: Exception | None = None
+        def _invoke_api():
+            with controlled_concurrency(evaluator, "Gemini API", conversation_id):
+                return self.llm.invoke(messages)
 
-        for attempt in range(1, _MAX_RETRIES + 1):
-            try:
-                response = self.llm.invoke(messages)
-                raw_text = self._convert_to_string(response.content)
-                self._log_to_file(system_prompt, user_prompt, raw_text)
-                return raw_text
-            except Exception as exc:
-                logger.warning(
-                    "LLM API call failed on attempt %d/%d: %s",
-                    attempt,
-                    _MAX_RETRIES,
-                    exc,
-                )
-                last_error = exc
-                if attempt < _MAX_RETRIES:
-                    time.sleep(_RETRY_BACKOFF_BASE ** attempt)
+        start_time = time.time()
+        try:
+            response = execute_with_retry(
+                _invoke_api,
+                evaluator=evaluator,
+                framework="Gemini API",
+                conversation_id=conversation_id,
+                max_retries=_MAX_RETRIES,
+                initial_delay=_RETRY_BACKOFF_BASE
+            )
+            raw_text = self._convert_to_string(response.content)
 
-        raise RuntimeError(
-            f"LLM call failed after {_MAX_RETRIES} attempts. Last error: {last_error}"
-        )
+            input_tokens = None
+            output_tokens = None
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                input_tokens = response.usage_metadata.get("input_tokens")
+                output_tokens = response.usage_metadata.get("output_tokens")
+            elif hasattr(response, "response_metadata") and response.response_metadata:
+                token_usage = response.response_metadata.get("token_usage", {})
+                if token_usage:
+                    input_tokens = token_usage.get("prompt_tokens")
+                    output_tokens = token_usage.get("completion_tokens")
+
+            duration = time.time() - start_time
+            self._log_to_file(
+                system_prompt, user_prompt, raw_text,
+                evaluator=evaluator, conversation_id=conversation_id,
+                duration=duration, status="success",
+                input_tokens=input_tokens, output_tokens=output_tokens
+            )
+            return raw_text
+        except Exception as exc:
+            duration = time.time() - start_time
+            self._log_to_file(
+                system_prompt, user_prompt, "",
+                evaluator=evaluator, conversation_id=conversation_id,
+                duration=duration, status="failed", error_type=exc.__class__.__name__
+            )
+            raise exc
 
     # ------------------------------------------------------------------
     # JSON extraction (robust)

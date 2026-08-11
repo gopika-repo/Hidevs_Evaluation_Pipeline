@@ -192,7 +192,14 @@ class TestEndToEndPipeline(unittest.TestCase):
             "expected_intent": "technical",
             "timestamp": "2026-08-11T00:00:00Z"
         }
-        response = self.client.post("/evaluate", json=payload)
+        with unittest.mock.patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness") as mock_deepeval:
+            mock_deepeval.return_value = {
+                "status": "failed",
+                "error": "Simulated framework failure",
+                "reason": "DeepEval execution failed."
+            }
+            response = self.client.post("/evaluate", json=payload)
+        
         self.assertEqual(response.status_code, 200)
         data = response.json()
         convo = data["conversations"][0]
