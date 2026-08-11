@@ -115,3 +115,22 @@ class TestAPIValidation(unittest.TestCase):
             self.assertIsNone(rq_eval["score"])
             self.assertEqual(rq_eval["status"], "failed")
             self.assertTrue(convo["evaluation_failed"])
+
+    def test_health_endpoint(self) -> None:
+        """GET /health returns healthy status and dave service name."""
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["status"], "healthy")
+        self.assertEqual(data["service"], "dave-evaluation-pipeline")
+
+    def test_cors_headers(self) -> None:
+        """CORS preflight request returns correct Origin headers."""
+        headers = {
+            "Origin": "http://localhost:5173",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "Content-Type",
+        }
+        response = self.client.options("/evaluate", headers=headers)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("access-control-allow-origin"), "http://localhost:5173")

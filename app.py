@@ -1,4 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 import logging
@@ -24,6 +25,24 @@ from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
 
 app = FastAPI(title="Evaluation Pipeline API")
 
+# Configure CORS
+origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
+frontend_origins_env = os.getenv("FRONTEND_ORIGINS")
+if frontend_origins_env:
+    # Safely parse comma-separated origins
+    parsed_origins = [o.strip() for o in frontend_origins_env.split(",") if o.strip()]
+    for origin in parsed_origins:
+        if origin not in origins:
+            origins.append(origin)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 @app.middleware("http")
 async def log_requests(request, call_next):
     print(f"--> Incoming request: {request.method} {request.url}", flush=True)
@@ -38,6 +57,13 @@ async def log_requests(request, call_next):
 @app.get("/")
 def read_root():
     return {"message": "Welcome to the Dave Evaluation Pipeline API. Use /evaluate to evaluate a conversation."}
+
+@app.get("/health")
+def health_check():
+    return {
+        "status": "healthy",
+        "service": "dave-evaluation-pipeline"
+    }
 
 @app.post("/evaluate")
 def run_evaluation(record: ConversationRecord):
