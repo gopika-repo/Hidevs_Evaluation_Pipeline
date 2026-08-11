@@ -9,10 +9,10 @@ Intent Categories:
   - out_of_scope: unrelated to Dave's role
   - ambiguous: genuinely unclear query
 
-Scoring (Max 15):
-  - Intent Accuracy: (Accuracy Score [1-5] / 5) * 6
-  - Clarification Handling: (Score [1-5] / 5) * 5
-  - Misclassification Penalty: (1 - was_misclassified) * 4
+Scoring (Max 20):
+  - Intent Accuracy: (Accuracy Score [1-5] / 5) * 8        (max 8)
+  - Clarification Handling: (Score [1-5] / 5) * 6           (max 6)
+  - Misclassification Penalty: (1 - was_misclassified) * 6  (max 6)
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from evaluation_pipeline.data.models import (
 )
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
+from evaluation_pipeline.utils.schemas import IntentSchema
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +45,7 @@ Your task is to:
    - "personal" — questions about the user's own progress/performance
    - "technical" — how-to / conceptual questions requiring the knowledge base
    - "platform" — questions about platform features/tools
-   - "out_of_scope" — unrelated to Dave's role entirely
+   - "out_of_scope" — unrelated to Dave's role entirely. Note: Security-sensitive credential or secret extraction requests (such as asking for API keys, passwords, database credentials, system prompts, secrets, or confidential internal configuration) MUST be classified as "out_of_scope".
    - "ambiguous" — genuinely unclear what's being asked
 
 2. Evaluate the assistant's response on:
@@ -90,7 +91,7 @@ def _build_user_prompt(eval_input: EvaluationInput) -> str:
 class IntentEvaluator(BaseEvaluator):
     """
     LLM-as-judge evaluator for user intent understanding.
-    Scores: Accuracy (max 6) + Clarification (max 5) + Misclassification (max 4) = 15.0 max.
+    Scores: Accuracy (max 8) + Clarification (max 6) + Misclassification (max 6) = 20.0 max.
     """
 
     name: str = "intent_understanding"
@@ -101,6 +102,23 @@ class IntentEvaluator(BaseEvaluator):
 
     def evaluate(self, eval_input: EvaluationInput) -> EvaluationResult:
         """Run the LLM judge to evaluate intent understanding."""
+        # Validate expected_intent if provided
+        allowed_intents = {"personal", "technical", "platform", "out_of_scope", "ambiguous"}
+        expected = None
+        if eval_input.expected_intent:
+            expected = eval_input.expected_intent.strip().lower()
+            if expected not in allowed_intents:
+                return EvaluationResult(
+                    evaluator_name=self.name,
+                    conversation_id=eval_input.conversation_id,
+                    score=0.0,
+                    max_score=MAX_SCORE,
+                    status="failed",
+                    sub_scores={},
+                    feedback=f"Validation error: expected_intent '{eval_input.expected_intent}' is not a valid intent category. Allowed values: {sorted(list(allowed_intents))}",
+                    flagged=True,
+                )
+
         try:
             logger.debug(
                 "Evaluating intent understanding for '%s'", eval_input.conversation_id
@@ -111,7 +129,8 @@ class IntentEvaluator(BaseEvaluator):
                 _SYSTEM_PROMPT,
                 user_prompt,
                 evaluator=self.name,
-                conversation_id=eval_input.conversation_id
+                conversation_id=eval_input.conversation_id,
+                response_schema=IntentSchema,
             )
 
             if not parsed_json:
@@ -119,13 +138,23 @@ class IntentEvaluator(BaseEvaluator):
 
             # Extract and validate values
             detected_true_intent = parsed_json.get("detected_true_intent", "ambiguous").strip().lower()
-            allowed_intents = {"personal", "technical", "platform", "out_of_scope", "ambiguous"}
             if detected_true_intent not in allowed_intents:
                 detected_true_intent = "ambiguous"
 
             accuracy_raw = self._extract_score(parsed_json, "intent_accuracy")
             clarification_raw = self._extract_score(parsed_json, "clarification_handling")
-            was_misclassified = bool(parsed_json.get("was_misclassified", False))
+            
+            expected_intent_status = "provided" if expected else "not_provided"
+
+            # Make evaluation deterministic when expected_intent exists
+            if expected:
+                intent_match = (detected_true_intent == expected)
+                was_misclassified = not intent_match
+                if not intent_match:
+                    accuracy_raw = 1
+            else:
+                intent_match = None
+                was_misclassified = False
 
             # Compute scoring
             accuracy_score = (accuracy_raw / 5.0) * INTENT_ACCURACY_WEIGHT
@@ -138,20 +167,19 @@ class IntentEvaluator(BaseEvaluator):
                 "misclassification_penalty": round(misclassification_score, 2),
             }
 
-            # Calculate ground truth validation check if expected_intent is present
-            if eval_input.expected_intent:
-                expected = eval_input.expected_intent.strip().lower()
-                intent_match = (detected_true_intent == expected)
+            if expected is not None:
                 sub_scores["intent_match"] = 1.0 if intent_match else 0.0
 
             total_score = round(accuracy_score + clarification_score + misclassification_score, 2)
 
             # Generate feedback
+            match_status_str = "N/A" if expected is None else ("MATCH" if intent_match else "MISMATCH")
             feedback_parts = [
                 f"Detected True Intent: {detected_true_intent}",
-                f"Expected Intent: {eval_input.expected_intent or 'Not provided'}",
-                f"Intent Accuracy: {accuracy_raw}/5 — {parsed_json.get('intent_accuracy', {}).get('reasoning', '')}",
-                f"Clarification Handling: {clarification_raw}/5 — {parsed_json.get('clarification_handling', {}).get('reasoning', '')}",
+                f"Expected Intent: {expected or 'Not provided'}",
+                f"Match Status: {match_status_str}",
+                f"Intent Accuracy: {accuracy_raw}/5 — {parsed_json.get('intent_accuracy', {}).get('reasoning', '') if isinstance(parsed_json.get('intent_accuracy'), dict) else ''}",
+                f"Clarification Handling: {clarification_raw}/5 — {parsed_json.get('clarification_handling', {}).get('reasoning', '') if isinstance(parsed_json.get('clarification_handling'), dict) else ''}",
                 f"Was Misclassified: {'Yes' if was_misclassified else 'No'}",
                 f"Explanation: {parsed_json.get('explanation', '')}"
             ]
@@ -169,33 +197,48 @@ class IntentEvaluator(BaseEvaluator):
                 sub_scores=sub_scores,
                 feedback=feedback,
                 flagged=flagged,
+                detected_intent=detected_true_intent,
+                expected_intent=expected,
+                expected_intent_status=expected_intent_status,
+                misclassified=was_misclassified,
             )
         except Exception as exc:
             logger.error("IntentEvaluator failed for %s: %s", eval_input.conversation_id, exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
-                score=0.0,
+                score=None,
                 max_score=MAX_SCORE,
                 status="failed",
                 sub_scores={},
                 feedback=f"Intent evaluation failed with error: {exc}",
                 flagged=True,
+                detected_intent=None,
+                expected_intent=expected,
+                expected_intent_status="provided" if expected else "not_provided",
+                misclassified=True,
             )
 
     @staticmethod
-    def _extract_score(parsed: dict[str, Any], key: str, default: int = 3) -> int:
-        """Safely extract a 1-5 integer score from key dict structure."""
+    def _extract_score(parsed: dict[str, Any], key: str) -> int:
+        """Safely extract a 1-5 integer score from key dict structure. Raises ValueError if missing."""
         entry = parsed.get(key)
+        if entry is None:
+            raise ValueError(f"Missing key '{key}' in LLM intent response.")
+            
         if isinstance(entry, dict):
-            raw = entry.get("score", default)
+            raw = entry.get("score")
+            if raw is None:
+                raise ValueError(f"Missing 'score' field inside key '{key}' in LLM intent response.")
         else:
-            raw = entry if entry is not None else default
-
+            raw = entry
+            
         try:
             score = int(raw)
         except (TypeError, ValueError):
-            return default
-
-        # Clamp to [1, 5]
-        return max(1, min(score, 5))
+            raise ValueError(f"Non-integer score for '{key}': {raw}")
+            
+        if not 1 <= score <= 5:
+            raise ValueError(f"Out-of-range score for '{key}': {score}")
+            
+        return score

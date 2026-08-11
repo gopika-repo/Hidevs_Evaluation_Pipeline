@@ -1,7 +1,7 @@
 """
 Abstract base evaluator interface.
 
-All concrete evaluators (response_quality, groundedness, safety) MUST
+All concrete evaluators (response_quality, groundedness, safety, intent_understanding, memory_and_continuity) MUST
 inherit from BaseEvaluator and implement the `evaluate` method, returning
 an EvaluationResult with real, LLM-generated feedback — never placeholders.
 """
@@ -79,12 +79,13 @@ class BaseEvaluator(ABC):
             try:
                 result = self.evaluate(eval_input)
                 results.append(result)
+                score_str = f"{result.score:.2f}" if result.score is not None else "N/A"
                 logger.info(
-                    "[%s] Evaluated '%s': score=%.2f/%.2f, flagged=%s",
+                    "[%s] Evaluated '%s': score=%s/%s, flagged=%s",
                     self.name,
                     eval_input.conversation_id,
-                    result.score,
-                    result.max_score,
+                    score_str,
+                    f"{result.max_score:.2f}",
                     result.flagged,
                 )
             except Exception as exc:
@@ -99,8 +100,9 @@ class BaseEvaluator(ABC):
                 error_result = EvaluationResult(
                     evaluator_name=self.name,
                     conversation_id=eval_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
+                    status="failed",
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,

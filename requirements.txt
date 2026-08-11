@@ -1,10 +1,10 @@
 # ============================================================
-# Dave Evaluation Pipeline — Requirements (Phase 0A foundation)
+# Dave Evaluation Pipeline — Requirements (Phase 1)
 # ============================================================
 # Core
 pydantic>=2.7,<3.0
 
-# Evaluation frameworks (wired up in Phase 0B / 0C)
+# Evaluation frameworks (Phase 1)
 deepeval>=2.0.0
 langchain>=0.2.0
 langchain-google-genai>=2.0.0

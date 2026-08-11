@@ -2,20 +2,21 @@
 Groundedness / Hallucination Evaluator — Phase 1
 
 Evaluates whether Dave's response is grounded in evidence and free of
-fabricated claims. Branches logic based on conversation type:
+fabricated claims. Uses the same three custom LLM metrics for both paths:
 
-**Context-Backed** (max = 15):
-  • Evidence Coverage       — (supported / total claims) × 5
-  • Faithfulness to Context — (faithfulness_score / 5) × 5
-  • Unsupported Claims      — (1 − unsupported / total) × 2.5
-  • Contradiction Detection — (1 − contradictions / total) × 2.5
-  + TruLens groundedness score (stored for comparison, not averaged in)
-  + DeepEval faithfulness score (stored for comparison, not averaged in)
+**Context-Backed** (max = 20):
+  Custom LLM judge scores:
+  • Internal Consistency  — (score / 5) × 6   (max 6)
+  • Overconfidence        — (score / 5) × 6   (max 6)
+  • Hallucination Risk    — (score / 5) × 8   (max 8)
+  + TruLens groundedness score (stored for comparison, not added to score)
+  + DeepEval faithfulness score (stored for comparison, not added to score)
 
-**Context-Free** (max = 15):
-  • Internal Consistency  — (consistency_score / 5) × 5
-  • Overconfidence        — (overconfidence_score / 5) × 5
-  • Hallucination Risk    — (hallucination_score / 5) × 5
+**Context-Free** (max = 20):
+  Custom LLM judge scores:
+  • Internal Consistency  — (score / 5) × 6   (max 6)
+  • Overconfidence        — (score / 5) × 6   (max 6)
+  • Hallucination Risk    — (score / 5) × 8   (max 8)
 """
 
 from __future__ import annotations
@@ -31,8 +32,11 @@ from evaluation_pipeline.data.models import (
 )
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
+from evaluation_pipeline.utils.schemas import GroundednessSchema
 
 logger = logging.getLogger(__name__)
+
+_shared_executor = ThreadPoolExecutor(max_workers=32)
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -94,8 +98,7 @@ the provided source context.
 
 {chat_history_section}
 
-Extract ALL factual claims from the response and classify each against
-the source context. Return ONLY valid JSON.
+Score each dimension 1–5 (5 = good, no issues). Return ONLY valid JSON.
 """
 
 # ---------------------------------------------------------------------------
@@ -201,9 +204,8 @@ def _run_trulens_groundedness(
                     return float(score[0])
                 return float(score)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner_exec:
-            fut = inner_exec.submit(_invoke)
-            return fut.result(timeout=trulens_timeout)
+        fut = _shared_executor.submit(_invoke)
+        return fut.result(timeout=trulens_timeout)
 
     try:
         score_val = execute_with_retry(
@@ -273,9 +275,8 @@ def _run_deepeval_faithfulness(
                 metric.measure(test_case)
                 return float(metric.score)
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as inner_exec:
-            fut = inner_exec.submit(_invoke)
-            return fut.result(timeout=deepeval_timeout)
+        fut = _shared_executor.submit(_invoke)
+        return fut.result(timeout=deepeval_timeout)
 
     try:
         score_val = execute_with_retry(
@@ -305,10 +306,9 @@ def _run_deepeval_faithfulness(
 class GroundednessEvaluator(BaseEvaluator):
     """
     Groundedness / hallucination evaluator with branching logic:
-      - Context-backed → claim extraction + faithfulness (max 15)
-      - Context-free   → consistency + overconfidence + hallucination risk (max 15)
-
-    Also runs TruLens and DeepEval in parallel for comparison (context-backed only).
+      - Context-backed → consistency + overconfidence + hallucination risk (max 20)
+                         + TruLens and DeepEval for comparison
+      - Context-free   → consistency + overconfidence + hallucination risk (max 20)
     """
 
     name: str = "groundedness"
@@ -323,11 +323,23 @@ class GroundednessEvaluator(BaseEvaluator):
 
     def evaluate(self, eval_input: EvaluationInput) -> EvaluationResult:
         """Branch to context-backed or context-free evaluation."""
-
-        if eval_input.conversation_type == ConversationType.CONTEXT_BACKED:
-            return self._evaluate_context_backed(eval_input)
-        else:
-            return self._evaluate_context_free(eval_input)
+        try:
+            if eval_input.conversation_type == ConversationType.CONTEXT_BACKED:
+                return self._evaluate_context_backed(eval_input)
+            else:
+                return self._evaluate_context_free(eval_input)
+        except Exception as exc:
+            logger.error("GroundednessEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                status="failed",
+                sub_scores={},
+                feedback=f"Groundedness evaluation failed with error: {exc}",
+                flagged=True,
+            )
 
     # ------------------------------------------------------------------
     # Context-Backed evaluation
@@ -355,48 +367,47 @@ class GroundednessEvaluator(BaseEvaluator):
         parsed_json: dict[str, Any] = {}
         raw_text: str = ""
 
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            # Submit all three evaluations
-            future_custom = executor.submit(
-                self._run_custom_context_backed_judge, eval_input
-            )
-            future_trulens = executor.submit(
-                _run_trulens_groundedness, context, response, eval_input.conversation_id
-            )
-            future_deepeval = executor.submit(
-                _run_deepeval_faithfulness,
-                eval_input.user_query,
-                response,
-                context,
-                eval_input.conversation_id
-            )
+        # Submit all three evaluations to the shared executor
+        future_custom = _shared_executor.submit(
+            self._run_custom_context_backed_judge, eval_input
+        )
+        future_trulens = _shared_executor.submit(
+            _run_trulens_groundedness, context, response, eval_input.conversation_id
+        )
+        future_deepeval = _shared_executor.submit(
+            _run_deepeval_faithfulness,
+            eval_input.user_query,
+            response,
+            context,
+            eval_input.conversation_id
+        )
 
             # Collect results safely
-            try:
-                parsed_json, raw_text = future_custom.result()
-            except Exception as exc:
-                logger.error("Groundedness custom judge failed for %s: %s", eval_input.conversation_id, exc)
-                parsed_json = {}
-                raw_text = ""
-                
-            try:
-                trulens_res = future_trulens.result()
-            except Exception as exc:
-                logger.error("Groundedness TruLens failed for %s: %s", eval_input.conversation_id, exc)
-                trulens_res = {"status": "failed", "error": str(exc)}
-                
-            try:
-                deepeval_res = future_deepeval.result()
-            except Exception as exc:
-                logger.error("Groundedness DeepEval failed for %s: %s", eval_input.conversation_id, exc)
-                deepeval_res = {"status": "failed", "error": str(exc)}
+        try:
+            parsed_json, raw_text = future_custom.result()
+        except Exception as exc:
+            logger.error("Groundedness custom judge failed for %s: %s", eval_input.conversation_id, exc)
+            parsed_json = {}
+            raw_text = ""
+            
+        try:
+            trulens_res = future_trulens.result()
+        except Exception as exc:
+            logger.error("Groundedness TruLens failed for %s: %s", eval_input.conversation_id, exc)
+            trulens_res = {"status": "failed", "error": str(exc)}
+            
+        try:
+            deepeval_res = future_deepeval.result()
+        except Exception as exc:
+            logger.error("Groundedness DeepEval failed for %s: %s", eval_input.conversation_id, exc)
+            deepeval_res = {"status": "failed", "error": str(exc)}
 
         # --- Check if custom judge failed ----
         if not parsed_json:
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
-                score=0.0,
+                score=None,
                 max_score=_MAX_SCORE_CONTEXT_BACKED,
                 status="failed",
                 sub_scores={},
@@ -405,15 +416,9 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         # --- Compute scores from custom judge ----
-        consistency_raw = self._extract_score(
-            parsed_json, "internal_consistency", default=3
-        )
-        overconfidence_raw = self._extract_score(
-            parsed_json, "overconfidence", default=3
-        )
-        hallucination_raw = self._extract_score(
-            parsed_json, "hallucination_risk", default=3
-        )
+        consistency_raw = self._extract_score(parsed_json, "internal_consistency")
+        overconfidence_raw = self._extract_score(parsed_json, "overconfidence")
+        hallucination_raw = self._extract_score(parsed_json, "hallucination_risk")
 
         consistency_score = (consistency_raw / 5.0) * 6.0
         overconfidence_score = (overconfidence_raw / 5.0) * 6.0
@@ -489,7 +494,8 @@ class GroundednessEvaluator(BaseEvaluator):
             _SYSTEM_PROMPT_CONTEXT_BACKED,
             user_prompt,
             evaluator=self.name,
-            conversation_id=eval_input.conversation_id
+            conversation_id=eval_input.conversation_id,
+            response_schema=GroundednessSchema,
         )
 
     @staticmethod
@@ -574,14 +580,15 @@ class GroundednessEvaluator(BaseEvaluator):
             _SYSTEM_PROMPT_CONTEXT_FREE,
             user_prompt,
             evaluator=self.name,
-            conversation_id=eval_input.conversation_id
+            conversation_id=eval_input.conversation_id,
+            response_schema=GroundednessSchema,
         )
 
         if not parsed_json:
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
-                score=0.0,
+                score=None,
                 max_score=_MAX_SCORE_CONTEXT_FREE,
                 status="failed",
                 sub_scores={},
@@ -590,15 +597,9 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         # Extract scores
-        consistency_raw = self._extract_score(
-            parsed_json, "internal_consistency", default=3
-        )
-        overconfidence_raw = self._extract_score(
-            parsed_json, "overconfidence", default=3
-        )
-        hallucination_raw = self._extract_score(
-            parsed_json, "hallucination_risk", default=3
-        )
+        consistency_raw = self._extract_score(parsed_json, "internal_consistency")
+        overconfidence_raw = self._extract_score(parsed_json, "overconfidence")
+        hallucination_raw = self._extract_score(parsed_json, "hallucination_risk")
 
         # Apply formulas: (score / 5) × category_max (6, 6, 8)
         consistency_score = (consistency_raw / 5.0) * 6.0
@@ -683,42 +684,30 @@ class GroundednessEvaluator(BaseEvaluator):
     def _extract_score(
         parsed: dict[str, Any],
         key: str,
-        default: int = 3,
     ) -> int:
         """
         Safely extract a 1–5 integer score from a parsed JSON entry.
-
-        The entry can be either:
-          - {"score": 4, "reasoning": "..."}   (nested dict)
-          - 4                                    (bare int)
+        Raises ValueError if missing or invalid.
         """
         entry = parsed.get(key)
 
         if entry is None:
-            logger.warning("Missing key '%s' in LLM response, using default %d", key, default)
-            return default
+            raise ValueError(f"Missing key '{key}' in LLM response.")
 
         if isinstance(entry, dict):
-            raw = entry.get("score", default)
+            raw = entry.get("score")
+            if raw is None:
+                raise ValueError(f"Missing 'score' field inside key '{key}' in LLM response.")
         else:
             raw = entry
 
         try:
             score = int(raw)
         except (TypeError, ValueError):
-            logger.warning(
-                "Non-integer score for '%s': %s, using default %d",
-                key,
-                raw,
-                default,
-            )
-            return default
+            raise ValueError(f"Non-integer score for '{key}': {raw}")
 
         # Clamp to [1, 5]
         if not 1 <= score <= 5:
-            logger.warning(
-                "Out-of-range score for '%s': %d, clamping to [1, 5]", key, score
-            )
-            score = max(1, min(score, 5))
+            raise ValueError(f"Out-of-range score for '{key}': {score}")
 
         return score

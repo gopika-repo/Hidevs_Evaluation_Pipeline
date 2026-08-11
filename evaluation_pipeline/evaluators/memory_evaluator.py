@@ -16,6 +16,7 @@ from evaluation_pipeline.data.models import (
 )
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
+from evaluation_pipeline.utils.schemas import MemorySchema
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,8 @@ class MemoryEvaluator(BaseEvaluator):
                 _SYSTEM_PROMPT,
                 user_prompt,
                 evaluator=self.name,
-                conversation_id=eval_input.conversation_id
+                conversation_id=eval_input.conversation_id,
+                response_schema=MemorySchema,
             )
 
             if not parsed_json:
@@ -141,9 +143,9 @@ class MemoryEvaluator(BaseEvaluator):
                 )
 
             # 3. Extract scores
-            context_raw = self._extract_score(parsed_json, "context_continuity", default=3)
-            retention_raw = self._extract_score(parsed_json, "information_retention", default=3)
-            consistency_raw = self._extract_score(parsed_json, "consistency_across_turns", default=3)
+            context_raw = self._extract_score(parsed_json, "context_continuity")
+            retention_raw = self._extract_score(parsed_json, "information_retention")
+            consistency_raw = self._extract_score(parsed_json, "consistency_across_turns")
 
             # 4. Apply Formulas
             # Metric 1: Context Continuity (max 8)
@@ -207,17 +209,25 @@ class MemoryEvaluator(BaseEvaluator):
             )
 
     @staticmethod
-    def _extract_score(parsed: dict[str, Any], key: str, default: int = 3) -> int:
-        """Safely extract a 1–5 integer score from a parsed JSON entry."""
+    def _extract_score(parsed: dict[str, Any], key: str) -> int:
+        """Safely extract a 1–5 integer score from a parsed JSON entry. Raises ValueError if missing."""
         entry = parsed.get(key)
         if entry is None:
-            return default
+            raise ValueError(f"Missing key '{key}' in LLM memory response.")
+            
         if isinstance(entry, dict):
-            raw = entry.get("score", default)
+            raw = entry.get("score")
+            if raw is None:
+                raise ValueError(f"Missing 'score' field inside key '{key}' in LLM memory response.")
         else:
             raw = entry
+            
         try:
             score = int(raw)
         except (TypeError, ValueError):
-            return default
-        return min(max(score, 1), 5)
+            raise ValueError(f"Non-integer score for '{key}': {raw}")
+            
+        if not 1 <= score <= 5:
+            raise ValueError(f"Out-of-range score for '{key}': {score}")
+            
+        return score

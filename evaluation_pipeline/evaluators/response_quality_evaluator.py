@@ -27,6 +27,7 @@ from evaluation_pipeline.data.models import (
 )
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
+from evaluation_pipeline.utils.schemas import ResponseQualitySchema
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 _METRICS = ("correctness", "helpfulness", "clarity", "completeness")
 _MAX_METRIC_SCORE = 5
-_METRIC_WEIGHT = 5  # each contributes up to 5 points (Phase 1: halved from 10)
+_METRIC_WEIGHT = 5  # each contributes up to 5 points
 _MAX_TOTAL = len(_METRICS) * _METRIC_WEIGHT  # 20
 
 _SYSTEM_PROMPT = """\
@@ -138,7 +139,8 @@ class ResponseQualityEvaluator(BaseEvaluator):
                 _SYSTEM_PROMPT,
                 user_prompt,
                 evaluator=self.name,
-                conversation_id=eval_input.conversation_id
+                conversation_id=eval_input.conversation_id,
+                response_schema=ResponseQualitySchema,
             )
 
             if not parsed_json:
@@ -185,7 +187,7 @@ class ResponseQualityEvaluator(BaseEvaluator):
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
-                score=0.0,
+                score=None,
                 max_score=float(_MAX_TOTAL),
                 status="failed",
                 sub_scores={},

@@ -19,32 +19,75 @@ def run():
     rq_result = EvaluationResult(
         evaluator_name="response_quality",
         conversation_id="demo_123",
-        score=35.0,
-        max_score=40.0,
-        sub_scores={"correctness": 8.0, "helpfulness": 9.0, "clarity": 10.0, "completeness": 8.0},
-        feedback="Good response",
+        score=14.0,
+        max_score=20.0,
+        sub_scores={"correctness": 4.0, "helpfulness": 3.0, "clarity": 4.0, "completeness": 3.0},
+        feedback="Good response quality overall",
         flagged=False
     )
 
     gd_result = EvaluationResult(
         evaluator_name="groundedness",
         conversation_id="demo_123",
-        score=28.0,
-        max_score=30.0,
-        sub_scores={"consistency": 10.0, "hallucination": 9.0},
-        feedback="Well grounded",
+        score=16.0,
+        max_score=20.0,
+        sub_scores={
+            "internal_consistency": 6.0,
+            "overconfidence": 4.8,
+            "hallucination_risk": 5.2,
+            "trulens_status": "not_applicable",
+            "trulens_reason": "No retrieved context available",
+            "deepeval_status": "not_applicable",
+            "deepeval_reason": "No retrieved context available",
+        },
+        feedback="Well grounded context-free response",
         flagged=False
     )
 
     safety_result = EvaluationResult(
         evaluator_name="safety",
         conversation_id="demo_123",
-        score=12.0, # Rule capped
-        max_score=30.0,
-        percentage=40.0,
-        sub_scores={"prompt_system_protection": 10.0, "internal_data_protection": 0.0, "boundary_policy_compliance": 2.0},
-        feedback="Rule triggered for mongodb_uri.",
-        flagged=True
+        score=14.0,
+        max_score=20.0,
+        percentage=70.0,
+        sub_scores={
+            "confidentiality_information_protection": 6.0,
+            "security_attack_resistance": 3.6,
+            "boundary_policy_compliance": 4.4,
+            "attack_detected": True,
+            "attack_resisted": True,
+            "actual_confidential_leak": False,
+            "critical_violation": False,
+            "flagged": False,
+        },
+        feedback="Rule triggered for mongodb_uri mention but no actual leak.",
+        flagged=False
+    )
+
+    intent_result = EvaluationResult(
+        evaluator_name="intent_understanding",
+        conversation_id="demo_123",
+        score=18.0,
+        max_score=20.0,
+        sub_scores={"intent_accuracy": 6.4, "clarification_handling": 6.0, "misclassification_penalty": 6.0},
+        feedback="Correctly identified technical intent",
+        flagged=False
+    )
+
+    memory_result = EvaluationResult(
+        evaluator_name="memory_and_continuity",
+        conversation_id="demo_123",
+        score=None,
+        max_score=20.0,
+        applicable=False,
+        status="not_applicable",
+        sub_scores={
+            "context_continuity": None,
+            "information_retention": None,
+            "consistency_across_turns": None,
+        },
+        feedback="No prior conversation history available for memory evaluation",
+        flagged=False
     )
 
     agg = ScoreAggregator()
@@ -52,7 +95,9 @@ def run():
         inputs=[inp],
         rq_results=[rq_result],
         gd_results=[gd_result],
-        safety_results=[safety_result]
+        safety_results=[safety_result],
+        intent_results=[intent_result],
+        memory_results=[memory_result],
     )
 
     print(json.dumps(report, indent=2))

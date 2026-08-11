@@ -48,7 +48,7 @@ def run_evaluation(record: ConversationRecord):
     builder = DatasetBuilder()
     inputs = builder.build([record])
     if not inputs:
-        return {"error": "Failed to parse input record"}
+        raise HTTPException(status_code=400, detail="Failed to parse input record")
     
     evaluation_input = inputs[0]
     
@@ -75,7 +75,7 @@ def run_evaluation(record: ConversationRecord):
                 rq_res = EvaluationResult(
                     evaluator_name=rq_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -91,7 +91,7 @@ def run_evaluation(record: ConversationRecord):
                 gd_res = EvaluationResult(
                     evaluator_name=gd_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -107,7 +107,7 @@ def run_evaluation(record: ConversationRecord):
                 sf_res = EvaluationResult(
                     evaluator_name=sf_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -123,7 +123,7 @@ def run_evaluation(record: ConversationRecord):
                 it_res = EvaluationResult(
                     evaluator_name=it_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},

@@ -154,9 +154,11 @@ class LLMJudge:
         user_prompt: str,
         evaluator: str = "unknown",
         conversation_id: str = "unknown",
+        response_schema: type[BaseModel] | None = None,
     ) -> tuple[dict[str, Any], str]:
         """
         Call the LLM and parse structured JSON from its response.
+        Uses native structured output if response_schema is provided, with fallback to manual JSON extraction.
         """
         from evaluation_pipeline.utils.concurrency import controlled_concurrency
         from evaluation_pipeline.utils.retry_utils import execute_with_retry
@@ -166,11 +168,48 @@ class LLMJudge:
             HumanMessage(content=user_prompt),
         ]
 
+        start_time = time.time()
+
+        # 1. Native Structured Output Attempt
+        if response_schema:
+            try:
+                # Bind response schema to LLM
+                structured_llm = self.llm.with_structured_output(response_schema, method="json_schema")
+                
+                def _invoke_structured():
+                    with controlled_concurrency(evaluator, "Gemini API (Structured)", conversation_id):
+                        return structured_llm.invoke(messages)
+
+                response_obj = execute_with_retry(
+                    _invoke_structured,
+                    evaluator=evaluator,
+                    framework="Gemini API (Structured)",
+                    conversation_id=conversation_id,
+                    max_retries=_MAX_RETRIES,
+                    initial_delay=_RETRY_BACKOFF_BASE
+                )
+                
+                if response_obj is not None:
+                    parsed_dict = response_obj.model_dump()
+                    duration = time.time() - start_time
+                    
+                    self._log_to_file(
+                        system_prompt, user_prompt, str(parsed_dict),
+                        evaluator=evaluator, conversation_id=conversation_id,
+                        duration=duration, status="success",
+                    )
+                    return parsed_dict, str(parsed_dict)
+            except Exception as structured_exc:
+                logger.warning(
+                    "[%s] Native structured output failed for %s. Error: %s. Falling back to old JSON extractor.",
+                    evaluator, conversation_id, structured_exc
+                )
+
+        # 2. Fallback to raw text + regex JSON extraction
         def _invoke_api():
             with controlled_concurrency(evaluator, "Gemini API", conversation_id):
                 return self.llm.invoke(messages)
 
-        start_time = time.time()
         try:
             response = execute_with_retry(
                 _invoke_api,
@@ -201,6 +240,12 @@ class LLMJudge:
                 input_tokens=input_tokens, output_tokens=output_tokens
             )
             parsed = self._extract_json(raw_text)
+            
+            if response_schema:
+                # Validate the fallback parsed dict against schema
+                validated_obj = response_schema(**parsed)
+                parsed = validated_obj.model_dump()
+                
             return parsed, raw_text
         except Exception as exc:
             duration = time.time() - start_time

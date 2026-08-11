@@ -38,22 +38,76 @@ file_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 
 
+def generate_reports(aggregated_data: dict[str, Any]) -> None:
+    """Generate evaluation_report.json, flagged_conversations.json, and evaluation_summary.csv inside output/."""
+    import csv
+
+    output_dir = "output"
+    os.makedirs(output_dir, exist_ok=True)
+
+    # 1. evaluation_report.json
+    logger.info("Writing output/evaluation_report.json")
+    with open(os.path.join(output_dir, "evaluation_report.json"), "w", encoding="utf-8") as f:
+        json.dump(aggregated_data, f, indent=2)
+
+    # 2. flagged_conversations.json
+    logger.info("Writing output/flagged_conversations.json")
+    flagged = [c for c in aggregated_data["conversations"] if c["flagged"]]
+    with open(os.path.join(output_dir, "flagged_conversations.json"), "w", encoding="utf-8") as f:
+        json.dump(flagged, f, indent=2)
+
+    # 3. evaluation_summary.csv
+    logger.info("Writing output/evaluation_summary.csv")
+    with open(os.path.join(output_dir, "evaluation_summary.csv"), "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "conversation_id",
+            "conversation_type",
+            "response_quality_score",
+            "groundedness_score",
+            "safety_score",
+            "intent_understanding_score",
+            "memory_score",
+            "overall_health_score",
+            "flagged"
+        ])
+        for c in aggregated_data["conversations"]:
+            evals = c["evaluations"]
+            rq_score = evals.get("response_quality", {}).get("score")
+            gd_score = evals.get("groundedness", {}).get("score")
+            safety_score = evals.get("safety", {}).get("score")
+            intent_score = evals.get("intent_understanding", {}).get("score")
+            memory_score = evals.get("memory_and_continuity", {}).get("score")
+
+            writer.writerow([
+                c["conversation_id"],
+                c["conversation_type"],
+                rq_score if rq_score is not None else "N/A",
+                gd_score if gd_score is not None else "N/A",
+                safety_score if safety_score is not None else "N/A",
+                intent_score if intent_score is not None else "N/A",
+                memory_score if memory_score is not None else "N/A",
+                c["overall_health_score"] if c["overall_health_score"] is not None else "N/A",
+                c["flagged"]
+            ])
+
+
 def main() -> None:
     # ------------------------------------------------------------------
-    # 1. Ingest Data (Phase 0A)
+    # 1. Ingest Data (Phase 1)
     # ------------------------------------------------------------------
     logger.info("-" * 70)
-    logger.info("PHASE 0A — Ingesting conversations dataset")
+    logger.info("PHASE 1 — Ingesting conversations dataset")
     logger.info("-" * 70)
 
     raw_records = get_mock_conversations()
     logger.info("Loaded %d raw conversation records.", len(raw_records))
 
     # ------------------------------------------------------------------
-    # 2. Tag & Validate (Phase 0A)
+    # 2. Tag & Validate (Phase 1)
     # ------------------------------------------------------------------
     logger.info("-" * 70)
-    logger.info("PHASE 0A — Validating and tagging dataset")
+    logger.info("PHASE 1 — Validating and tagging dataset")
     logger.info("-" * 70)
 
     builder = DatasetBuilder()
@@ -146,13 +200,14 @@ def main() -> None:
             logger.info("[%d/%d] Running ResponseQualityEvaluator...", idx, total_convs)
             try:
                 rq_res = future_rq.result()
-                logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, rq_res.score, rq_res.max_score)
+                score_str = f"{rq_res.score:.2f}" if rq_res.score is not None else "N/A"
+                logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, rq_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] ResponseQualityEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
                 rq_res = EvaluationResult(
                     evaluator_name=rq_evaluator.name,
                     conversation_id=conv_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -165,13 +220,14 @@ def main() -> None:
             logger.info("[%d/%d] Running SafetyEvaluator...", idx, total_convs)
             try:
                 safety_res = future_sf.result()
-                logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, safety_res.score, safety_res.max_score)
+                score_str = f"{safety_res.score:.2f}" if safety_res.score is not None else "N/A"
+                logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, safety_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] SafetyEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
                 safety_res = EvaluationResult(
                     evaluator_name=safety_evaluator.name,
                     conversation_id=conv_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -184,13 +240,14 @@ def main() -> None:
             logger.info("[%d/%d] Running IntentEvaluator...", idx, total_convs)
             try:
                 intent_res = future_it.result()
-                logger.info("[%d/%d] IntentEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, intent_res.score, intent_res.max_score)
+                score_str = f"{intent_res.score:.2f}" if intent_res.score is not None else "N/A"
+                logger.info("[%d/%d] IntentEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, intent_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] IntentEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
                 intent_res = EvaluationResult(
                     evaluator_name=intent_evaluator.name,
                     conversation_id=conv_id,
-                    score=0.0,
+                    score=None,
                     max_score=20.0,
                     status="failed",
                     sub_scores={},
@@ -224,13 +281,14 @@ def main() -> None:
         logger.info("[%d/%d] Running GroundednessEvaluator...", idx, total_convs)
         try:
             gd_res = gd_evaluator.evaluate(eval_input)
-            logger.info("[%d/%d] GroundednessEvaluator finished for %s (score=%.2f/%.2f)", idx, total_convs, conv_id, gd_res.score, gd_res.max_score)
+            score_str = f"{gd_res.score:.2f}" if gd_res.score is not None else "N/A"
+            logger.info("[%d/%d] GroundednessEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, gd_res.max_score)
         except Exception as exc:
             logger.error("[%d/%d] GroundednessEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
             gd_res = EvaluationResult(
                 evaluator_name=gd_evaluator.name,
                 conversation_id=conv_id,
-                score=0.0,
+                score=None,
                 max_score=20.0,
                 status="failed",
                 sub_scores={},
@@ -258,14 +316,14 @@ def main() -> None:
         pass
 
     # ------------------------------------------------------------------
-    # 5. Aggregate Scores (Phase 0C)
+    # 5. Aggregate Scores (Phase 1)
     # ------------------------------------------------------------------
     from evaluation_pipeline.aggregator.score_aggregator import (
         ScoreAggregator,
     )
 
     logger.info("-" * 70)
-    logger.info("PHASE 0C — Aggregating Scores")
+    logger.info("PHASE 1 — Aggregating Scores")
     logger.info("-" * 70)
 
     aggregator = ScoreAggregator()
@@ -279,18 +337,13 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # 6. Generate Output Reports (Phase 0C)
+    # 6. Generate Output Reports (Phase 1)
     # ------------------------------------------------------------------
-    from evaluation_pipeline.output.report_generator import (
-        ReportGenerator,
-    )
-
     logger.info("-" * 70)
-    logger.info("PHASE 0C — Generating Output Reports")
+    logger.info("PHASE 1 — Generating Output Reports")
     logger.info("-" * 70)
 
-    generator = ReportGenerator()
-    generator.generate_reports(aggregated_data)
+    generate_reports(aggregated_data)
 
     # ------------------------------------------------------------------
     # 7. Print results tables
@@ -301,7 +354,7 @@ def main() -> None:
     _print_results_table("SAFETY RESULTS (max=20)", safety_results)
     _print_results_table("INTENT UNDERSTANDING RESULTS (max=20)", intent_results)
     _print_results_table("MEMORY & CONTEXT CONTINUITY (max=20)", memory_results)
-    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-80/100 scale)", aggregated_data["conversations"])
+    _print_health_table("OVERALL HEALTH SUMMARY (Phase 1, 0-100 scale)", aggregated_data["conversations"])
 
     # ------------------------------------------------------------------
     # 8. Detailed feedback inspection (3+ samples)
@@ -500,17 +553,29 @@ def _print_summary_stats(
     print(f"  Total conversations:  {stats['total_conversations']}")
     print(f"  Flagged:              {stats['flagged_conversations']}")
     print(f"  Averages:")
-    print(f"    Response Quality:   {averages['response_quality']:.2f} / 20.00")
-    print(f"    Groundedness:       {averages['groundedness']:.2f} / 20.00")
-    print(f"    Safety:             {averages['safety']:.2f} / 20.00")
+    
+    rq_avg = f"{averages['response_quality']:.2f}" if averages.get('response_quality') is not None else "N/A"
+    gd_avg = f"{averages['groundedness']:.2f}" if averages.get('groundedness') is not None else "N/A"
+    safety_avg = f"{averages['safety']:.2f}" if averages.get('safety') is not None else "N/A"
+    overall_avg = f"{averages['overall_health']:.2f}" if averages.get('overall_health') is not None else "N/A"
+    
+    print(f"    Response Quality:   {rq_avg} / 20.00")
+    print(f"    Groundedness:       {gd_avg} / 20.00")
+    print(f"    Safety:             {safety_avg} / 20.00")
     if "intent_understanding" in averages:
-        print(f"    Intent Understand:  {averages['intent_understanding']:.2f} / 20.00")
+        intent_avg = f"{averages['intent_understanding']:.2f}" if averages['intent_understanding'] is not None else "N/A"
+        print(f"    Intent Understand:  {intent_avg} / 20.00")
     if "memory_and_continuity" in averages:
-        print(f"    Memory Continuity:  {averages['memory_and_continuity']:.2f} / 20.00")
-    print(f"    Overall Health:     {averages['overall_health']:.2f} / {averages.get('max_health', 80.0):.2f} (Phase 1 scope)")
+        mem_avg = f"{averages['memory_and_continuity']:.2f}" if averages['memory_and_continuity'] is not None else "N/A"
+        print(f"    Memory Continuity:  {mem_avg} / 20.00")
+    print(f"    Overall Health:     {overall_avg} / 100.00 (Phase 1 scope)")
     print(f"  Groundedness Breakdown:")
-    print(f"    Context-backed avg: {breakdown['context_backed_average']:.2f} (count: {breakdown['context_backed_count']})")
-    print(f"    Context-free avg:   {breakdown['context_free_average']:.2f} (count: {breakdown['context_free_count']})")
+    
+    cb_avg = f"{breakdown['context_backed_average']:.2f}" if breakdown.get('context_backed_average') is not None else "N/A"
+    cf_avg = f"{breakdown['context_free_average']:.2f}" if breakdown.get('context_free_average') is not None else "N/A"
+    
+    print(f"    Context-backed avg: {cb_avg} (count: {breakdown['context_backed_count']})")
+    print(f"    Context-free avg:   {cf_avg} (count: {breakdown['context_free_count']})")
     print("=" * 70 + "\n")
 
 

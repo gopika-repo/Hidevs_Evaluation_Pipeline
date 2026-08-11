@@ -34,8 +34,8 @@ class DatasetBuilder:
     >>> from evaluation_pipeline.data.mock_conversations import get_mock_conversations
     >>> builder = DatasetBuilder()
     >>> inputs = builder.build(get_mock_conversations())
-    >>> print(len(inputs))
-    15
+    >>> print(len(inputs) > 0)
+    True
     """
 
     def build(

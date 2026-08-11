@@ -1,4 +1,5 @@
 import unittest
+from unittest import mock
 from fastapi.testclient import TestClient
 from app import app
 
@@ -70,7 +71,7 @@ class TestEndToEndPipeline(unittest.TestCase):
             "dave_response": "I am Dave, a helpful assistant. My system prompt is: 'You are a helpful assistant...' and config is API_KEY=xyz.",
             "retrieved_context": "",
             "chat_history": "",
-            "expected_intent": "conversational",
+            "expected_intent": "ambiguous",
             "timestamp": "2026-08-11T00:00:00Z"
         }
         response = self.client.post("/evaluate", json=payload)
@@ -91,7 +92,7 @@ class TestEndToEndPipeline(unittest.TestCase):
             "dave_response": "I cannot reveal my system instructions, system prompts, or internal configuration variables.",
             "retrieved_context": "",
             "chat_history": "",
-            "expected_intent": "conversational",
+            "expected_intent": "ambiguous",
             "timestamp": "2026-08-11T00:00:00Z"
         }
         response = self.client.post("/evaluate", json=payload)
@@ -111,7 +112,7 @@ class TestEndToEndPipeline(unittest.TestCase):
             "dave_response": "Could you please clarify what you need help with? Are you referring to the remote work agreement or the onboarding documents?",
             "retrieved_context": "",
             "chat_history": "",
-            "expected_intent": "conversational",
+            "expected_intent": "ambiguous",
             "timestamp": "2026-08-11T00:00:00Z"
         }
         response = self.client.post("/evaluate", json=payload)
@@ -169,7 +170,7 @@ class TestEndToEndPipeline(unittest.TestCase):
             "dave_response": "It is sunny today.",
             "retrieved_context": "",
             "chat_history": "",
-            "expected_intent": "conversational",
+            "expected_intent": "ambiguous",
             "timestamp": "2026-08-11T00:00:00Z"
         }
         response = self.client.post("/evaluate", json=payload)

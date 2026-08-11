@@ -89,6 +89,18 @@ class ConversationRecord(BaseModel):
                 f"'{info.field_name}' must contain non-whitespace characters"
             )
         return stripped
+
+    @field_validator("expected_intent")
+    @classmethod
+    def validate_expected_intent(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        allowed = ["personal", "technical", "platform", "out_of_scope", "ambiguous"]
+        if v not in allowed:
+            raise ValueError(
+                f"expected_intent must be one of {allowed}, got: {v}"
+            )
+        return v
         
     model_config = {
         "json_schema_extra": {
@@ -185,6 +197,18 @@ class EvaluationResult(BaseModel):
     )
     status: str = Field(
         default="success", description="Status of the evaluation: success, failed, or not_applicable"
+    )
+    detected_intent: Optional[str] = Field(
+        default=None, description="The detected intent label"
+    )
+    expected_intent: Optional[str] = Field(
+        default=None, description="The expected intent label"
+    )
+    expected_intent_status: str = Field(
+        default="not_provided", description="Whether expected intent was provided or not_provided"
+    )
+    misclassified: bool = Field(
+        default=False, description="Whether the conversation was misclassified"
     )
 
     @field_validator("feedback")
