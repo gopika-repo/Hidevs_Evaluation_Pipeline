@@ -17,7 +17,15 @@ pydantic>=2.7,<3.0
 # Evaluation Frameworks
 # ------------------------------------------------------------
 deepeval>=2.0.0
-trulens-eval==2.12.0
+
+# Only trulens.providers.google is imported anywhere in this codebase
+# (evaluation_pipeline/evaluators/groundedness_evaluator.py). The old
+# trulens-eval package additionally installs the Streamlit dashboard +
+# full Jupyter/notebook stack (200+ packages), which was bloating the
+# build and causing slow container spin-up / deploy timeouts on Render.
+# Swapped for the lighter core packages that only bring in what's used.
+trulens-core==2.12.0
+trulens-feedback==2.12.0
 trulens-providers-google==2.12.0
 
 # ------------------------------------------------------------
