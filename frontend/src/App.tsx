@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import './App.css';
+import { getApiBaseUrl } from './api';
 
 interface SubScores {
   [key: string]: any;
@@ -95,10 +96,20 @@ function App() {
     memory_and_continuity: false,
   });
 
-  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+  let apiBaseUrl = '';
+  let configError: string | null = null;
+  try {
+    apiBaseUrl = getApiBaseUrl();
+  } catch (err: any) {
+    configError = err?.message || 'VITE_API_BASE_URL is not configured.';
+  }
 
   // Check API health status
   const checkHealth = async () => {
+    if (configError) {
+      setApiStatus('disconnected');
+      return;
+    }
     try {
       const res = await fetch(`${apiBaseUrl}/health`, { method: 'GET' });
       if (res.ok) {
@@ -113,6 +124,7 @@ function App() {
 
   useEffect(() => {
     checkHealth();
+    if (configError) return;
     // Poll health status every 15 seconds
     const interval = setInterval(checkHealth, 15000);
     return () => clearInterval(interval);
@@ -124,6 +136,10 @@ function App() {
 
   const handleEvaluate = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (configError) {
+      setErrorMsg({ title: 'Configuration Error', desc: configError });
+      return;
+    }
     setErrorMsg(null);
     setReport(null);
 
@@ -206,6 +222,15 @@ function App() {
           {apiStatus === 'disconnected' && 'API Disconnected'}
         </div>
       </header>
+
+      {configError && (
+        <div className="error-container" style={{ borderColor: '#ef4444', backgroundColor: '#fef2f2' }}>
+          <div>
+            <h3 className="error-title" style={{ color: '#b91c1c' }}>Configuration Error</h3>
+            <p className="error-desc" style={{ color: '#7f1d1d' }}>{configError}</p>
+          </div>
+        </div>
+      )}
 
       {errorMsg && (
         <div className="error-container">
@@ -299,7 +324,7 @@ function App() {
               />
             </div>
 
-            <button type="submit" className="btn-evaluate" disabled={isLoading}>
+            <button type="submit" className="btn-evaluate" disabled={isLoading || !!configError}>
               {isLoading ? (
                 <>
                   <span className="spinner" /> Evaluating...
