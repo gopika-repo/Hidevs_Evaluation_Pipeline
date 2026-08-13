@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 import os
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
@@ -25,6 +26,19 @@ from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
 from evaluation_pipeline.utils.error_handler import classify_exception
 
 app = FastAPI(title="Evaluation Pipeline API")
+
+# Module-level persistent executor — shared across all requests.
+# CRITICAL: We NEVER use `with ThreadPoolExecutor() as executor:` inside a
+# request handler because the context-manager __exit__ calls
+# `executor.shutdown(wait=True)`, which blocks until ALL submitted worker
+# threads finish. That means a slow/hung evaluator worker can delay the
+# HTTP response far beyond the configured EVALUATION_REQUEST_TIMEOUT.
+#
+# Solution: use a persistently alive executor. Request handlers submit
+# futures and call future.result(timeout=...) per-future, then return.
+# Slow background workers continue independently, release their semaphore
+# slot via the controlled_concurrency finally-block, then terminate.
+_EVAL_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
 # Configure CORS
 origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
@@ -79,116 +93,127 @@ def run_evaluation(record: ConversationRecord):
     
     evaluation_input = inputs[0]
     
-    import time
     request_timeout = float(os.getenv("EVALUATION_REQUEST_TIMEOUT", "45.0"))
     deadline = time.time() + request_timeout
     evaluation_input.deadline = deadline
 
     try:
-        # 2. Run evaluators concurrently with timeouts
+        # 2. Run evaluators concurrently with timeouts.
+        # NOTE: We use the module-level _EVAL_EXECUTOR (NOT a `with` block).
+        # A `with ThreadPoolExecutor() as executor:` context manager calls
+        # shutdown(wait=True) on __exit__, which blocks the HTTP response
+        # until ALL worker threads finish — even if they have already timed out.
+        # Using the persistent _EVAL_EXECUTOR avoids this entirely.
         rq_evaluator = ResponseQualityEvaluator()
         gd_evaluator = GroundednessEvaluator()
         sf_evaluator = SafetyEvaluator()
         it_evaluator = IntentEvaluator()
         me_evaluator = MemoryEvaluator()
-        
-        with ThreadPoolExecutor(max_workers=5) as executor:
-            future_rq = executor.submit(rq_evaluator.evaluate, evaluation_input)
-            future_gd = executor.submit(gd_evaluator.evaluate, evaluation_input)
-            future_sf = executor.submit(sf_evaluator.evaluate, evaluation_input)
-            future_it = executor.submit(it_evaluator.evaluate, evaluation_input)
-            future_me = executor.submit(me_evaluator.evaluate, evaluation_input)
-            
-            # Response Quality
-            try:
-                remaining = max(1.0, deadline - time.time())
-                rq_res = future_rq.result(timeout=remaining)
-            except Exception as exc:
-                logger.error("ResponseQualityEvaluator failed: %s", exc, exc_info=True)
-                error_status = classify_exception(exc)
-                rq_res = EvaluationResult(
-                    evaluator_name=rq_evaluator.name,
-                    conversation_id=evaluation_input.conversation_id,
-                    score=None,
-                    max_score=20.0,
-                    status=error_status,
-                    sub_scores={},
-                    feedback=f"Evaluation failed with error: {exc}",
-                    flagged=True,
-                )
 
-            # Groundedness
-            try:
-                remaining = max(1.0, deadline - time.time())
-                gd_res = future_gd.result(timeout=remaining)
-            except Exception as exc:
-                logger.error("GroundednessEvaluator failed: %s", exc, exc_info=True)
-                error_status = classify_exception(exc)
-                gd_res = EvaluationResult(
-                    evaluator_name=gd_evaluator.name,
-                    conversation_id=evaluation_input.conversation_id,
-                    score=None,
-                    max_score=20.0,
-                    status=error_status,
-                    sub_scores={},
-                    feedback=f"Evaluation failed with error: {exc}",
-                    flagged=True,
-                )
+        # Submit all evaluators immediately so they run in parallel
+        future_rq = _EVAL_EXECUTOR.submit(rq_evaluator.evaluate, evaluation_input)
+        future_gd = _EVAL_EXECUTOR.submit(gd_evaluator.evaluate, evaluation_input)
+        future_sf = _EVAL_EXECUTOR.submit(sf_evaluator.evaluate, evaluation_input)
+        future_it = _EVAL_EXECUTOR.submit(it_evaluator.evaluate, evaluation_input)
+        future_me = _EVAL_EXECUTOR.submit(me_evaluator.evaluate, evaluation_input)
 
-            # Safety
-            try:
-                remaining = max(1.0, deadline - time.time())
-                sf_res = future_sf.result(timeout=remaining)
-            except Exception as exc:
-                logger.error("SafetyEvaluator failed: %s", exc, exc_info=True)
-                error_status = classify_exception(exc)
-                sf_res = EvaluationResult(
-                    evaluator_name=sf_evaluator.name,
-                    conversation_id=evaluation_input.conversation_id,
-                    score=None,
-                    max_score=20.0,
-                    status=error_status,
-                    sub_scores={},
-                    feedback=f"Evaluation failed with error: {exc}",
-                    flagged=True,
-                )
+        # Collect results sequentially, each with a shrinking remaining budget.
+        # After each future.result(timeout=...) call, we either have the result
+        # or an exception — the request handler does NOT wait for the underlying
+        # worker thread to finish. Background workers continue independently,
+        # release their semaphore slot in the controlled_concurrency finally-block,
+        # and terminate when their own downstream timeout (GEMINI_TIMEOUT etc.) fires.
 
-            # Intent
-            try:
-                remaining = max(1.0, deadline - time.time())
-                it_res = future_it.result(timeout=remaining)
-            except Exception as exc:
-                logger.error("IntentEvaluator failed: %s", exc, exc_info=True)
-                error_status = classify_exception(exc)
-                it_res = EvaluationResult(
-                    evaluator_name=it_evaluator.name,
-                    conversation_id=evaluation_input.conversation_id,
-                    score=None,
-                    max_score=20.0,
-                    status=error_status,
-                    sub_scores={},
-                    feedback=f"Evaluation failed with error: {exc}",
-                    flagged=True,
-                )
+        # Response Quality
+        try:
+            remaining = max(0.05, deadline - time.time())
+            rq_res = future_rq.result(timeout=remaining)
+        except Exception as exc:
+            logger.error("ResponseQualityEvaluator failed: %s", exc, exc_info=True)
+            error_status = classify_exception(exc)
+            rq_res = EvaluationResult(
+                evaluator_name=rq_evaluator.name,
+                conversation_id=evaluation_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                status=error_status,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
 
-            # Memory
-            try:
-                remaining = max(1.0, deadline - time.time())
-                me_res = future_me.result(timeout=remaining)
-            except Exception as exc:
-                logger.error("MemoryEvaluator failed: %s", exc, exc_info=True)
-                error_status = classify_exception(exc)
-                me_res = EvaluationResult(
-                    evaluator_name=me_evaluator.name,
-                    conversation_id=evaluation_input.conversation_id,
-                    score=None,
-                    max_score=20.0,
-                    applicable=False,
-                    status=error_status,
-                    sub_scores={},
-                    feedback=f"Evaluation failed with error: {exc}",
-                    flagged=True,
-                )
+        # Groundedness
+        try:
+            remaining = max(0.05, deadline - time.time())
+            gd_res = future_gd.result(timeout=remaining)
+        except Exception as exc:
+            logger.error("GroundednessEvaluator failed: %s", exc, exc_info=True)
+            error_status = classify_exception(exc)
+            gd_res = EvaluationResult(
+                evaluator_name=gd_evaluator.name,
+                conversation_id=evaluation_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                status=error_status,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+
+        # Safety
+        try:
+            remaining = max(0.05, deadline - time.time())
+            sf_res = future_sf.result(timeout=remaining)
+        except Exception as exc:
+            logger.error("SafetyEvaluator failed: %s", exc, exc_info=True)
+            error_status = classify_exception(exc)
+            sf_res = EvaluationResult(
+                evaluator_name=sf_evaluator.name,
+                conversation_id=evaluation_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                status=error_status,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+
+        # Intent
+        try:
+            remaining = max(0.05, deadline - time.time())
+            it_res = future_it.result(timeout=remaining)
+        except Exception as exc:
+            logger.error("IntentEvaluator failed: %s", exc, exc_info=True)
+            error_status = classify_exception(exc)
+            it_res = EvaluationResult(
+                evaluator_name=it_evaluator.name,
+                conversation_id=evaluation_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                status=error_status,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
+
+        # Memory
+        try:
+            remaining = max(0.05, deadline - time.time())
+            me_res = future_me.result(timeout=remaining)
+        except Exception as exc:
+            logger.error("MemoryEvaluator failed: %s", exc, exc_info=True)
+            error_status = classify_exception(exc)
+            me_res = EvaluationResult(
+                evaluator_name=me_evaluator.name,
+                conversation_id=evaluation_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                applicable=False,
+                status=error_status,
+                sub_scores={},
+                feedback=f"Evaluation failed with error: {exc}",
+                flagged=True,
+            )
         
         # 3. Aggregate
         aggregator = ScoreAggregator()

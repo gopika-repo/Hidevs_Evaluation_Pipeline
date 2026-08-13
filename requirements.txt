@@ -37,7 +37,14 @@ langchain-google-genai>=2.0.0
 # ------------------------------------------------------------
 # Google Gemini
 # ------------------------------------------------------------
+# google-generativeai: required by langchain-google-genai internals.
 google-generativeai>=0.8.0
+# google-genai: required by production code directly.
+# `from google.genai.errors import APIError` and
+# `from google.genai.types import GenerateContentConfig`
+# are both provided by the `google-genai` package (NOT google-generativeai).
+# Confirmed installed version: 2.10.0. Pinning >=2.0.0 ensures availability.
+google-genai>=2.0.0
 
 # ------------------------------------------------------------
 # LLM Gateway / Providers

@@ -63,11 +63,12 @@ class TestPhase8Timeouts:
         data = response.json()
 
         # The request budget of 0.1s is guaranteed to expire, mapping evaluators to "timeout"
-        eval_statuses = [result["status"] for result in data["evaluator_results"]]
+        convo = data["conversations"][0]
+        eval_statuses = [res["status"] for res in convo["evaluations"].values()]
         assert "timeout" in eval_statuses
 
         # Overall health should reflect missing metrics
-        assert data["overall_health_score"] is None or data["overall_health_score"] < 100.0
+        assert convo["overall_health_score"] is None or convo["overall_health_score"] < 100.0
 
         # Reset environment
         del os.environ["EVALUATION_REQUEST_TIMEOUT"]

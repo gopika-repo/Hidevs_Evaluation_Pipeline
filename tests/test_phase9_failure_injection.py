@@ -70,7 +70,7 @@ class TestPhase9FailureInjection(unittest.TestCase):
             nonlocal call_count
             call_count += 1
             from google.genai.errors import APIError
-            raise APIError(code=429, message="Rate limit exceeded")
+            raise APIError(429, "Rate limit exceeded", {})
 
         with patch("evaluation_pipeline.utils.llm_client.LLMJudge.call_with_json", side_effect=failing_429):
             payload = {
@@ -181,7 +181,7 @@ class TestPhase9FailureInjection(unittest.TestCase):
             if evaluator == "safety":
                 return {"confidentiality_information_protection": {"score": 5, "reasoning": "ok"}, "security_attack_resistance": {"score": 5, "reasoning": "ok"}, "boundary_policy_compliance": {"score": 5, "reasoning": "ok"}}, ""
             if evaluator == "intent_understanding":
-                return {"intent_accuracy": {"score": 5, "reasoning": "ok"}, "clarification_handling": {"score": 5, "reasoning": "ok"}, "misclassification_component": {"score": 5, "reasoning": "ok"}}, ""
+                return {"intent_classification": {"score": 5, "reasoning": "ok"}, "clarification_handling": {"score": 5, "reasoning": "ok"}, "actionability": {"score": 5, "reasoning": "ok"}}, ""
             if evaluator == "memory_and_continuity":
                 return {"context_continuity": {"score": 5, "reasoning": "ok"}, "information_retention": {"score": 5, "reasoning": "ok"}, "consistency_across_turns": {"score": 5, "reasoning": "ok"}}, ""
             return {}, ""
@@ -339,16 +339,17 @@ class TestPhase9FailureInjection(unittest.TestCase):
         agg = ScoreAggregator()
         dummy_input = EvaluationInput(
             conversation_id="AGG-001",
-            user_query="Query",
-            dave_response="Response",
-            conversation_type=ConversationType.CONTEXT_FREE
+            user_query="Query for aggregator test",
+            dave_response="Response for aggregator test",
+            conversation_type=ConversationType.CONTEXT_FREE,
+            timestamp="2026-08-13T12:00:00Z"
         )
 
-        rq_ok = EvaluationResult(evaluator_name="rq", conversation_id="AGG-001", score=15.0, max_score=20.0, status="success", sub_scores={}, feedback="ok", flagged=False)
-        gd_failed = EvaluationResult(evaluator_name="gd", conversation_id="AGG-001", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="fail", flagged=True)
-        sf_timeout = EvaluationResult(evaluator_name="sf", conversation_id="AGG-001", score=None, max_score=20.0, status="timeout", sub_scores={}, feedback="timeout", flagged=True)
-        it_ok = EvaluationResult(evaluator_name="it", conversation_id="AGG-001", score=20.0, max_score=20.0, status="success", sub_scores={}, feedback="ok", flagged=False)
-        me_na = EvaluationResult(evaluator_name="me", conversation_id="AGG-001", score=None, max_score=20.0, status="not_applicable", applicable=False, sub_scores={}, feedback="na", flagged=False)
+        rq_ok = EvaluationResult(evaluator_name="rq", conversation_id="AGG-001", score=15.0, max_score=20.0, status="success", sub_scores={}, feedback="Looks correct and well structured.", flagged=False)
+        gd_failed = EvaluationResult(evaluator_name="gd", conversation_id="AGG-001", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="Evaluation failed with an error.", flagged=True)
+        sf_timeout = EvaluationResult(evaluator_name="sf", conversation_id="AGG-001", score=None, max_score=20.0, status="timeout", sub_scores={}, feedback="Request timed out during eval.", flagged=True)
+        it_ok = EvaluationResult(evaluator_name="it", conversation_id="AGG-001", score=20.0, max_score=20.0, status="success", sub_scores={}, feedback="Intent correctly identified.", flagged=False)
+        me_na = EvaluationResult(evaluator_name="me", conversation_id="AGG-001", score=None, max_score=20.0, status="not_applicable", applicable=False, sub_scores={}, feedback="Not applicable metric here.", flagged=False)
 
         report = agg.aggregate_dataset(
             inputs=[dummy_input],
@@ -372,15 +373,16 @@ class TestPhase9FailureInjection(unittest.TestCase):
         agg = ScoreAggregator()
         dummy_input = EvaluationInput(
             conversation_id="AGG-002",
-            user_query="Query",
-            dave_response="Response",
-            conversation_type=ConversationType.CONTEXT_FREE
+            user_query="Query for aggregator test",
+            dave_response="Response for aggregator test",
+            conversation_type=ConversationType.CONTEXT_FREE,
+            timestamp="2026-08-13T12:00:00Z"
         )
 
-        rq_f = EvaluationResult(evaluator_name="rq", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="f", flagged=True)
-        gd_f = EvaluationResult(evaluator_name="gd", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="f", flagged=True)
-        sf_f = EvaluationResult(evaluator_name="sf", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="f", flagged=True)
-        it_f = EvaluationResult(evaluator_name="it", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="f", flagged=True)
+        rq_f = EvaluationResult(evaluator_name="rq", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="Evaluation failed with an error.", flagged=True)
+        gd_f = EvaluationResult(evaluator_name="gd", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="Evaluation failed with an error.", flagged=True)
+        sf_f = EvaluationResult(evaluator_name="sf", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="Evaluation failed with an error.", flagged=True)
+        it_f = EvaluationResult(evaluator_name="it", conversation_id="AGG-002", score=None, max_score=20.0, status="failed", sub_scores={}, feedback="Evaluation failed with an error.", flagged=True)
 
         report = agg.aggregate_dataset(
             inputs=[dummy_input],
