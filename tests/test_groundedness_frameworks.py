@@ -157,12 +157,12 @@ class TestGroundednessFrameworks(unittest.TestCase):
             "{}"
         )
         # Mocking the functions to execute the actual fallback check
-        mock_trulens.side_effect = lambda context, response, convo_id: {
+        mock_trulens.side_effect = lambda context, response, convo_id, *args, **kwargs: {
             "status": "not_applicable",
             "reason": "No retrieved context available"
         } if not context else {"status": "success", "score": 1.0}
         
-        mock_deepeval.side_effect = lambda user_query, response, context, convo_id: {
+        mock_deepeval.side_effect = lambda user_query, response, context, convo_id, *args, **kwargs: {
             "status": "not_applicable",
             "reason": "No retrieved context available"
         } if not context else {"status": "success", "score": 1.0}
@@ -181,3 +181,166 @@ class TestGroundednessFrameworks(unittest.TestCase):
         self.assertEqual(res.score, 20.0)
         self.assertEqual(res.sub_scores["trulens_status"], "not_applicable")
         self.assertEqual(res.sub_scores["deepeval_status"], "not_applicable")
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_trulens_success_zero_score_preserved(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 1: TruLens success with score 0.0 -> preserve 0.0."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "success", "score": 0.0}
+        mock_deepeval.return_value = {"status": "success", "score": 1.0}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_trulens_zero",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["trulens_status"], "success")
+        self.assertIn("trulens_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["trulens_score"], 0.0)
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_trulens_failed_no_numeric_score(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 2: TruLens failed -> no numeric score."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "failed", "error": "Internal Error"}
+        mock_deepeval.return_value = {"status": "success", "score": 1.0}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_trulens_failed",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["trulens_status"], "failed")
+        self.assertNotIn("trulens_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["trulens_error"], "Internal Error")
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_trulens_not_applicable_no_numeric_score(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 3: TruLens not_applicable -> no numeric score."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "not_applicable", "reason": "No context"}
+        mock_deepeval.return_value = {"status": "success", "score": 1.0}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_trulens_na",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["trulens_status"], "not_applicable")
+        self.assertNotIn("trulens_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["trulens_reason"], "No context")
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_deepeval_success_zero_score_preserved(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 4: DeepEval success with score 0.0 -> preserve 0.0."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "success", "score": 1.0}
+        mock_deepeval.return_value = {"status": "success", "score": 0.0}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_deepeval_zero",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["deepeval_status"], "success")
+        self.assertIn("deepeval_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["deepeval_score"], 0.0)
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_deepeval_failed_no_numeric_score(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 5: DeepEval failed -> no numeric score."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "success", "score": 1.0}
+        mock_deepeval.return_value = {"status": "failed", "error": "API Error"}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_deepeval_failed",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["deepeval_status"], "failed")
+        self.assertNotIn("deepeval_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["deepeval_error"], "API Error")
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_trulens_groundedness")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._run_deepeval_faithfulness")
+    @patch.object(GroundednessEvaluator, "_run_custom_context_backed_judge")
+    def test_deepeval_not_applicable_no_numeric_score(self, mock_custom, mock_deepeval, mock_trulens) -> None:
+        """Requirement 6: DeepEval not_applicable -> no numeric score."""
+        mock_custom.return_value = (
+            {
+                "internal_consistency": {"score": 5, "reasoning": "ok"},
+                "overconfidence": {"score": 5, "reasoning": "ok"},
+                "hallucination_risk": {"score": 5, "reasoning": "ok"},
+                "explanation": "ok"
+            },
+            "{}"
+        )
+        mock_trulens.return_value = {"status": "success", "score": 1.0}
+        mock_deepeval.return_value = {"status": "not_applicable", "reason": "No context"}
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_deepeval_na",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q", dave_response="A", retrieved_context="C", timestamp=datetime.now()
+        )
+        res = self.evaluator.evaluate(eval_input)
+        self.assertEqual(res.sub_scores["deepeval_status"], "not_applicable")
+        self.assertNotIn("deepeval_score", res.sub_scores)
+        self.assertEqual(res.sub_scores["deepeval_reason"], "No context")
+

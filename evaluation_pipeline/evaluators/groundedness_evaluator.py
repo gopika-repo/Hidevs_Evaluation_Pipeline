@@ -459,21 +459,37 @@ class GroundednessEvaluator(BaseEvaluator):
         }
 
         # Store comparison details from external frameworks
-        sub_scores["trulens_status"] = trulens_res["status"]
-        if trulens_res["status"] == "success":
-            sub_scores["trulens_score"] = round(trulens_res["score"], 4)
-        elif trulens_res["status"] == "failed":
-            sub_scores["trulens_error"] = trulens_res["error"]
+        trulens_status = trulens_res.get("status")
+        if trulens_status == "success":
+            tr_score = trulens_res.get("score")
+            if tr_score is not None and isinstance(tr_score, (int, float)):
+                sub_scores["trulens_status"] = "success"
+                sub_scores["trulens_score"] = round(float(tr_score), 4)
+            else:
+                sub_scores["trulens_status"] = "failed"
+                sub_scores["trulens_error"] = "TruLens reported success but returned missing or invalid score."
+        elif trulens_status == "failed":
+            sub_scores["trulens_status"] = "failed"
+            sub_scores["trulens_error"] = trulens_res.get("error", "Unknown TruLens error")
         else:
-            sub_scores["trulens_reason"] = trulens_res["reason"]
+            sub_scores["trulens_status"] = "not_applicable"
+            sub_scores["trulens_reason"] = trulens_res.get("reason", "No retrieved context available")
 
-        sub_scores["deepeval_status"] = deepeval_res["status"]
-        if deepeval_res["status"] == "success":
-            sub_scores["deepeval_score"] = round(deepeval_res["score"], 4)
-        elif deepeval_res["status"] == "failed":
-            sub_scores["deepeval_error"] = deepeval_res["error"]
+        deepeval_status = deepeval_res.get("status")
+        if deepeval_status == "success":
+            de_score = deepeval_res.get("score")
+            if de_score is not None and isinstance(de_score, (int, float)):
+                sub_scores["deepeval_status"] = "success"
+                sub_scores["deepeval_score"] = round(float(de_score), 4)
+            else:
+                sub_scores["deepeval_status"] = "failed"
+                sub_scores["deepeval_error"] = "DeepEval reported success but returned missing or invalid score."
+        elif deepeval_status == "failed":
+            sub_scores["deepeval_status"] = "failed"
+            sub_scores["deepeval_error"] = deepeval_res.get("error", "Unknown DeepEval error")
         else:
-            sub_scores["deepeval_reason"] = deepeval_res["reason"]
+            sub_scores["deepeval_status"] = "not_applicable"
+            sub_scores["deepeval_reason"] = deepeval_res.get("reason", "No retrieved context available")
 
         total_score = round(
             consistency_score
@@ -562,16 +578,16 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # External framework comparison
         trulens_status = sub_scores.get("trulens_status", "unknown")
-        if trulens_status == "success":
-            parts.append(f"TruLens Groundedness (comparison): {sub_scores.get('trulens_score', 0.0):.4f}")
+        if trulens_status == "success" and "trulens_score" in sub_scores:
+            parts.append(f"TruLens Groundedness (comparison): {float(sub_scores['trulens_score']):.4f}")
         elif trulens_status == "failed":
             parts.append(f"TruLens Groundedness (comparison): FAILED. Error: {sub_scores.get('trulens_error', '')}")
         else:
             parts.append(f"TruLens Groundedness (comparison): NOT APPLICABLE. Reason: {sub_scores.get('trulens_reason', '')}")
 
         deepeval_status = sub_scores.get("deepeval_status", "unknown")
-        if deepeval_status == "success":
-            parts.append(f"DeepEval Faithfulness (comparison): {sub_scores.get('deepeval_score', 0.0):.4f}")
+        if deepeval_status == "success" and "deepeval_score" in sub_scores:
+            parts.append(f"DeepEval Faithfulness (comparison): {float(sub_scores['deepeval_score']):.4f}")
         elif deepeval_status == "failed":
             parts.append(f"DeepEval Faithfulness (comparison): FAILED. Error: {sub_scores.get('deepeval_error', '')}")
         else:
