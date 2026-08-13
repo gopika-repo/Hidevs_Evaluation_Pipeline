@@ -48,11 +48,15 @@ interface EvaluationReport {
       [key: string]: number | null;
     };
   };
+  conversations?: ConversationEvaluation[];
 }
 
-const renderScoreDisplay = (score: number | null, maxScore: number, status: string) => {
+export const renderScoreDisplay = (score: number | null, maxScore: number, status: string) => {
   if (status === 'success' || status === 'evaluated') {
-    return <>{score !== null ? score : '0'} <span>/ {maxScore}</span></>;
+    if (typeof score === 'number') {
+      return <>{score} <span>/ {maxScore}</span></>;
+    }
+    return <span className="score-text-status">N/A</span>;
   }
   if (status === 'not_applicable') {
     return <span className="score-text-status">NOT APPLICABLE</span>;
@@ -413,19 +417,19 @@ function App() {
                         <div className="subscores-grid">
                           <div className="subscore-item">
                             <div className="subscore-label">Correctness</div>
-                            <div className="subscore-value">{rq.sub_scores.correctness !== undefined ? `${rq.sub_scores.correctness} / 5` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof rq.sub_scores.correctness === 'number' ? `${rq.sub_scores.correctness} / 5` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Helpfulness</div>
-                            <div className="subscore-value">{rq.sub_scores.helpfulness !== undefined ? `${rq.sub_scores.helpfulness} / 5` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof rq.sub_scores.helpfulness === 'number' ? `${rq.sub_scores.helpfulness} / 5` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Clarity</div>
-                            <div className="subscore-value">{rq.sub_scores.clarity !== undefined ? `${rq.sub_scores.clarity} / 5` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof rq.sub_scores.clarity === 'number' ? `${rq.sub_scores.clarity} / 5` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Completeness</div>
-                            <div className="subscore-value">{rq.sub_scores.completeness !== undefined ? `${rq.sub_scores.completeness} / 5` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof rq.sub_scores.completeness === 'number' ? `${rq.sub_scores.completeness} / 5` : 'N/A'}</div>
                           </div>
                         </div>
                         <div className="feedback-box">
@@ -462,15 +466,15 @@ function App() {
                         <div className="subscores-grid">
                           <div className="subscore-item">
                             <div className="subscore-label">Internal Consistency</div>
-                            <div className="subscore-value">{gd.sub_scores.internal_consistency !== undefined ? `${gd.sub_scores.internal_consistency} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof gd.sub_scores.internal_consistency === 'number' ? `${gd.sub_scores.internal_consistency} / 6` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Overconfidence</div>
-                            <div className="subscore-value">{gd.sub_scores.overconfidence !== undefined ? `${gd.sub_scores.overconfidence} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof gd.sub_scores.overconfidence === 'number' ? `${gd.sub_scores.overconfidence} / 6` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Hallucination Risk</div>
-                            <div className="subscore-value">{gd.sub_scores.hallucination_risk !== undefined ? `${gd.sub_scores.hallucination_risk} / 8` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof gd.sub_scores.hallucination_risk === 'number' ? `${gd.sub_scores.hallucination_risk} / 8` : 'N/A'}</div>
                           </div>
                         </div>
 
@@ -531,15 +535,15 @@ function App() {
                         <div className="subscores-grid">
                           <div className="subscore-item">
                             <div className="subscore-label">Confidentiality & Information</div>
-                            <div className="subscore-value">{sf.sub_scores.confidentiality_information_protection !== undefined ? `${sf.sub_scores.confidentiality_information_protection} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof sf.sub_scores.confidentiality_information_protection === 'number' ? `${sf.sub_scores.confidentiality_information_protection} / 6` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Security Attack Resistance</div>
-                            <div className="subscore-value">{sf.sub_scores.security_attack_resistance !== undefined ? `${sf.sub_scores.security_attack_resistance} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof sf.sub_scores.security_attack_resistance === 'number' ? `${sf.sub_scores.security_attack_resistance} / 6` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Boundary & Policy</div>
-                            <div className="subscore-value">{sf.sub_scores.boundary_policy_compliance !== undefined ? `${sf.sub_scores.boundary_policy_compliance} / 8` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof sf.sub_scores.boundary_policy_compliance === 'number' ? `${sf.sub_scores.boundary_policy_compliance} / 8` : 'N/A'}</div>
                           </div>
                         </div>
 
@@ -607,15 +611,15 @@ function App() {
                         <div className="subscores-grid">
                           <div className="subscore-item">
                             <div className="subscore-label">Intent Accuracy</div>
-                            <div className="subscore-value">{it.sub_scores.intent_accuracy !== undefined ? `${it.sub_scores.intent_accuracy} / 8` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof it.sub_scores.intent_accuracy === 'number' ? `${it.sub_scores.intent_accuracy} / 8` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Clarification Handling</div>
-                            <div className="subscore-value">{it.sub_scores.clarification_handling !== undefined ? `${it.sub_scores.clarification_handling} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof it.sub_scores.clarification_handling === 'number' ? `${it.sub_scores.clarification_handling} / 6` : 'N/A'}</div>
                           </div>
                           <div className="subscore-item">
                             <div className="subscore-label">Misclassification Penalty</div>
-                            <div className="subscore-value">{it.sub_scores.misclassification_penalty !== undefined ? `${it.sub_scores.misclassification_penalty} / 6` : 'N/A'}</div>
+                            <div className="subscore-value">{typeof it.sub_scores.misclassification_penalty === 'number' ? `${it.sub_scores.misclassification_penalty} / 6` : 'N/A'}</div>
                           </div>
                         </div>
 
@@ -660,6 +664,7 @@ function App() {
 
                 const statusBadgeText = me.status;
                 const badgeClass = me.status === 'evaluated' || me.status === 'success' ? 'success' : me.status;
+                const isApp = me.applicable !== false && me.status !== 'not_applicable';
 
                 return (
                   <div className="evaluator-card">
@@ -684,15 +689,15 @@ function App() {
                             <div className="subscores-grid">
                               <div className="subscore-item">
                                 <div className="subscore-label">Context Continuity</div>
-                                <div className="subscore-value">{me.sub_scores.context_continuity !== undefined ? `${me.sub_scores.context_continuity} / 8` : 'N/A'}</div>
+                                <div className="subscore-value">{typeof me.sub_scores.context_continuity === 'number' ? `${me.sub_scores.context_continuity} / 8` : 'N/A'}</div>
                               </div>
                               <div className="subscore-item">
                                 <div className="subscore-label">Information Retention</div>
-                                <div className="subscore-value">{me.sub_scores.information_retention !== undefined ? `${me.sub_scores.information_retention} / 6` : 'N/A'}</div>
+                                <div className="subscore-value">{typeof me.sub_scores.information_retention === 'number' ? `${me.sub_scores.information_retention} / 6` : 'N/A'}</div>
                               </div>
                               <div className="subscore-item">
                                 <div className="subscore-label">Consistency Across Turns</div>
-                                <div className="subscore-value">{me.sub_scores.consistency_across_turns !== undefined ? `${me.sub_scores.consistency_across_turns} / 6` : 'N/A'}</div>
+                                <div className="subscore-value">{typeof me.sub_scores.consistency_across_turns === 'number' ? `${me.sub_scores.consistency_across_turns} / 6` : 'N/A'}</div>
                               </div>
                             </div>
                             <div className="feedback-box">
