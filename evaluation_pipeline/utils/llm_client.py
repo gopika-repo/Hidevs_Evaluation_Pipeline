@@ -169,7 +169,11 @@ class LLMJudge:
         api_timeout = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
         if deadline is not None:
             remaining = deadline - time.time()
-            api_timeout = max(1.0, min(api_timeout, remaining))
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Evaluation request deadline exceeded before Gemini call."
+                )
+            api_timeout = min(api_timeout, max(0.05, remaining))
 
         api_key = os.getenv("GOOGLE_API_KEY")
         local_llm = ChatGoogleGenerativeAI(
@@ -294,7 +298,11 @@ class LLMJudge:
         api_timeout = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
         if deadline is not None:
             remaining = deadline - time.time()
-            api_timeout = max(1.0, min(api_timeout, remaining))
+            if remaining <= 0:
+                raise TimeoutError(
+                    "Evaluation request deadline exceeded before Gemini call."
+                )
+            api_timeout = min(api_timeout, max(0.05, remaining))
 
         api_key = os.getenv("GOOGLE_API_KEY")
         local_llm = ChatGoogleGenerativeAI(
