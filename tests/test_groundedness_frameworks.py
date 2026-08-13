@@ -344,3 +344,58 @@ class TestGroundednessFrameworks(unittest.TestCase):
         self.assertNotIn("deepeval_score", res.sub_scores)
         self.assertEqual(res.sub_scores["deepeval_reason"], "No context")
 
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._shared_executor.submit")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator.time.time")
+    def test_deadline_collection_timeouts_bounded(self, mock_time, mock_submit) -> None:
+        """TEST 2 & 5: When deadline expires or is short during future collection, it uses a small bounded timeout."""
+        mock_time.return_value = 1000.0
+        deadline = 1000.01  # remaining is 0.01, bounded to 0.05
+
+        mock_future = MagicMock()
+        mock_submit.return_value = mock_future
+
+        eval_input = EvaluationInput(
+            conversation_id="conv_deadline_test",
+            conversation_type=ConversationType.CONTEXT_BACKED,
+            user_query="Q",
+            dave_response="A",
+            retrieved_context="C",
+            timestamp=datetime.now(),
+            deadline=deadline,
+        )
+
+        # Call evaluate
+        self.evaluator.evaluate(eval_input)
+
+        # Traces custom judge, trulens collector, and deepeval collector timeouts
+        self.assertEqual(mock_future.result.call_count, 3)
+        for call in mock_future.result.call_args_list:
+            timeout_arg = call.kwargs.get("timeout")
+            self.assertEqual(timeout_arg, 0.05)
+
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator._shared_executor.submit")
+    @patch("evaluation_pipeline.evaluators.groundedness_evaluator.time.time")
+    def test_trulens_deepeval_internal_timeouts_bounded(self, mock_time, mock_submit) -> None:
+        """TEST 1 & 3 & 4: TruLens and DeepEval internal timeouts do not become 1.0 second on small deadlines."""
+        from evaluation_pipeline.evaluators.groundedness_evaluator import (
+            _run_trulens_groundedness,
+            _run_deepeval_faithfulness,
+        )
+        mock_time.return_value = 1000.0
+        deadline = 1000.01  # remaining 0.01 -> floored to 0.05
+        
+        mock_future = MagicMock()
+        mock_submit.return_value = mock_future
+        
+        # Test TruLens: patch at source so the locally-imported name is intercepted
+        with patch("evaluation_pipeline.utils.retry_utils.execute_with_retry", side_effect=lambda f, *args, **kwargs: f()):
+            _run_trulens_groundedness("context", "response", "convo", deadline=deadline)
+            mock_future.result.assert_called_with(timeout=0.05)
+            
+        # Test DeepEval
+        mock_future.reset_mock()
+        with patch("evaluation_pipeline.utils.retry_utils.execute_with_retry", side_effect=lambda f, *args, **kwargs: f()):
+            _run_deepeval_faithfulness("query", "response", "context", "convo", deadline=deadline)
+            mock_future.result.assert_called_with(timeout=0.05)
+
+

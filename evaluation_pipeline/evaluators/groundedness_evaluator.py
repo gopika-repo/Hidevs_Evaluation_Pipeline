@@ -190,8 +190,8 @@ def _run_trulens_groundedness(
 
     trulens_timeout = float(os.getenv("TRULENS_TIMEOUT", "45.0"))
     if deadline is not None:
-        remaining = deadline - time.time()
-        trulens_timeout = max(1.0, min(trulens_timeout, remaining))
+        remaining = max(0.05, deadline - time.time())
+        trulens_timeout = min(trulens_timeout, remaining)
 
     def _call_trulens():
         from trulens.providers.google import Google
@@ -253,8 +253,8 @@ def _run_deepeval_faithfulness(
 
     deepeval_timeout = float(os.getenv("DEEPEVAL_TIMEOUT", "45.0"))
     if deadline is not None:
-        remaining = deadline - time.time()
-        deepeval_timeout = max(1.0, min(deepeval_timeout, remaining))
+        remaining = max(0.05, deadline - time.time())
+        deepeval_timeout = min(deepeval_timeout, remaining)
 
     def _call_deepeval():
         from deepeval.metrics import FaithfulnessMetric
@@ -400,7 +400,7 @@ class GroundednessEvaluator(BaseEvaluator):
         # Collect results safely with remaining time budget limits
         remaining = None
         if deadline is not None:
-            remaining = max(1.0, deadline - time.time())
+            remaining = max(0.05, deadline - time.time())
         try:
             parsed_json, raw_text = future_custom.result(timeout=remaining)
         except Exception as exc:
@@ -410,7 +410,7 @@ class GroundednessEvaluator(BaseEvaluator):
             custom_exc = exc
             
         if deadline is not None:
-            remaining = max(1.0, deadline - time.time())
+            remaining = max(0.05, deadline - time.time())
         try:
             trulens_res = future_trulens.result(timeout=remaining)
         except Exception as exc:
@@ -418,7 +418,7 @@ class GroundednessEvaluator(BaseEvaluator):
             trulens_res = {"status": "failed", "error": str(exc)}
             
         if deadline is not None:
-            remaining = max(1.0, deadline - time.time())
+            remaining = max(0.05, deadline - time.time())
         try:
             deepeval_res = future_deepeval.result(timeout=remaining)
         except Exception as exc:
