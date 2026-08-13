@@ -1,5 +1,6 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from evaluation_pipeline.utils.cors_config import get_allowed_origins
 import uvicorn
 import os
 import logging
@@ -40,19 +41,12 @@ app = FastAPI(title="Evaluation Pipeline API")
 # slot via the controlled_concurrency finally-block, then terminate.
 _EVAL_EXECUTOR = ThreadPoolExecutor(max_workers=10)
 
-# Configure CORS
-origins = ["http://localhost:5173", "http://127.0.0.1:5173", "http://localhost:3000", "http://127.0.0.1:3000"]
-frontend_origins_env = os.getenv("FRONTEND_ORIGINS")
-if frontend_origins_env:
-    # Safely parse comma-separated origins
-    parsed_origins = [o.strip() for o in frontend_origins_env.split(",") if o.strip()]
-    for origin in parsed_origins:
-        if origin not in origins:
-            origins.append(origin)
+# CORS — environment-driven origin policy (see evaluation_pipeline/utils/cors_config.py)
+allowed_origins = get_allowed_origins()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
