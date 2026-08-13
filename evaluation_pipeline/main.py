@@ -20,6 +20,7 @@ load_dotenv()
 
 from evaluation_pipeline.data.dataset_builder import DatasetBuilder
 from evaluation_pipeline.data.mock_conversations import get_mock_conversations
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 # Setup logger to output both to stderr and a dedicated file for visual tracking
 logger = logging.getLogger()
@@ -204,12 +205,13 @@ def main() -> None:
                 logger.info("[%d/%d] ResponseQualityEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, rq_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] ResponseQualityEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                error_status = classify_exception(exc)
                 rq_res = EvaluationResult(
                     evaluator_name=rq_evaluator.name,
                     conversation_id=conv_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -224,12 +226,13 @@ def main() -> None:
                 logger.info("[%d/%d] SafetyEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, safety_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] SafetyEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                error_status = classify_exception(exc)
                 safety_res = EvaluationResult(
                     evaluator_name=safety_evaluator.name,
                     conversation_id=conv_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -244,12 +247,13 @@ def main() -> None:
                 logger.info("[%d/%d] IntentEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, intent_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] IntentEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                error_status = classify_exception(exc)
                 intent_res = EvaluationResult(
                     evaluator_name=intent_evaluator.name,
                     conversation_id=conv_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -264,13 +268,14 @@ def main() -> None:
                 logger.info("[%d/%d] MemoryEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, me_res.max_score)
             except Exception as exc:
                 logger.error("[%d/%d] MemoryEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+                error_status = classify_exception(exc)
                 me_res = EvaluationResult(
                     evaluator_name=memory_evaluator.name,
                     conversation_id=conv_id,
                     score=None,
                     max_score=20.0,
                     applicable=False,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -285,12 +290,13 @@ def main() -> None:
             logger.info("[%d/%d] GroundednessEvaluator finished for %s (score=%s/%.2f)", idx, total_convs, conv_id, score_str, gd_res.max_score)
         except Exception as exc:
             logger.error("[%d/%d] GroundednessEvaluator failed for %s: %s", idx, total_convs, conv_id, exc, exc_info=True)
+            error_status = classify_exception(exc)
             gd_res = EvaluationResult(
                 evaluator_name=gd_evaluator.name,
                 conversation_id=conv_id,
                 score=None,
                 max_score=20.0,
-                status="failed",
+                status=error_status,
                 sub_scores={},
                 feedback=f"Evaluation failed with error: {exc}",
                 flagged=True,

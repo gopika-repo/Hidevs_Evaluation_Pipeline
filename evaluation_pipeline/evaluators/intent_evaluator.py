@@ -27,6 +27,7 @@ from evaluation_pipeline.data.models import (
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
 from evaluation_pipeline.utils.schemas import IntentSchema
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -111,9 +112,9 @@ class IntentEvaluator(BaseEvaluator):
                 return EvaluationResult(
                     evaluator_name=self.name,
                     conversation_id=eval_input.conversation_id,
-                    score=0.0,
+                    score=None,
                     max_score=MAX_SCORE,
-                    status="failed",
+                    status="invalid_output",
                     sub_scores={},
                     feedback=f"Validation error: expected_intent '{eval_input.expected_intent}' is not a valid intent category. Allowed values: {sorted(list(allowed_intents))}",
                     flagged=True,
@@ -204,12 +205,13 @@ class IntentEvaluator(BaseEvaluator):
             )
         except Exception as exc:
             logger.error("IntentEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            error_status = classify_exception(exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=MAX_SCORE,
-                status="failed",
+                status=error_status,
                 sub_scores={},
                 feedback=f"Intent evaluation failed with error: {exc}",
                 flagged=True,

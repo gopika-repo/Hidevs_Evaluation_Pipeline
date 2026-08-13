@@ -15,19 +15,29 @@ from evaluation_pipeline.utils.retry_utils import execute_with_retry, is_transie
 class TestConcurrencyAndTimeouts(unittest.TestCase):
     def test_concurrency_limits(self) -> None:
         """Verify that concurrency never exceeds the configured E_MAX limit under high thread count."""
+        import os
+        from evaluation_pipeline.utils import concurrency as conc_mod
+        # Set limit to 2 and force semaphore rebuild
+        os.environ["EVALUATION_MAX_CONCURRENCY"] = "2"
+        conc_mod._semaphore = None
+        conc_mod._current_limit = None
         reset_max_observed_concurrency()
         
         def run_call(i):
             with controlled_concurrency("evaluator_test", "MockFramework", f"conv_{i}"):
                 time.sleep(0.1)
 
-        # We execute 8 threads simultaneously. The limit MAX_CONCURRENCY is configured to 2 in tests.
+        # We execute 8 threads simultaneously. The limit MAX_CONCURRENCY is configured to 2.
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
             futures = [executor.submit(run_call, i) for i in range(8)]
             concurrent.futures.wait(futures)
 
         max_observed = get_max_observed_concurrency()
         self.assertLessEqual(max_observed, 2)
+        # Clean up
+        os.environ.pop("EVALUATION_MAX_CONCURRENCY", None)
+        conc_mod._semaphore = None
+        conc_mod._current_limit = None
 
     def test_retry_skip_non_transient(self) -> None:
         """Verify that non-transient errors (auth, validation, bad requests) are never retried."""

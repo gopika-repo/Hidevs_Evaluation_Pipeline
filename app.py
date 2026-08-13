@@ -22,6 +22,7 @@ from evaluation_pipeline.evaluators.safety_evaluator import SafetyEvaluator
 from evaluation_pipeline.evaluators.intent_evaluator import IntentEvaluator
 from evaluation_pipeline.evaluators.memory_evaluator import MemoryEvaluator
 from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 app = FastAPI(title="Evaluation Pipeline API")
 
@@ -98,12 +99,13 @@ def run_evaluation(record: ConversationRecord):
                 rq_res = future_rq.result(timeout=45.0)
             except Exception as exc:
                 logger.error("ResponseQualityEvaluator failed: %s", exc, exc_info=True)
+                error_status = classify_exception(exc)
                 rq_res = EvaluationResult(
                     evaluator_name=rq_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -114,12 +116,13 @@ def run_evaluation(record: ConversationRecord):
                 gd_res = future_gd.result(timeout=45.0)
             except Exception as exc:
                 logger.error("GroundednessEvaluator failed: %s", exc, exc_info=True)
+                error_status = classify_exception(exc)
                 gd_res = EvaluationResult(
                     evaluator_name=gd_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -130,12 +133,13 @@ def run_evaluation(record: ConversationRecord):
                 sf_res = future_sf.result(timeout=45.0)
             except Exception as exc:
                 logger.error("SafetyEvaluator failed: %s", exc, exc_info=True)
+                error_status = classify_exception(exc)
                 sf_res = EvaluationResult(
                     evaluator_name=sf_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -146,12 +150,13 @@ def run_evaluation(record: ConversationRecord):
                 it_res = future_it.result(timeout=45.0)
             except Exception as exc:
                 logger.error("IntentEvaluator failed: %s", exc, exc_info=True)
+                error_status = classify_exception(exc)
                 it_res = EvaluationResult(
                     evaluator_name=it_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,
@@ -162,13 +167,14 @@ def run_evaluation(record: ConversationRecord):
                 me_res = future_me.result(timeout=45.0)
             except Exception as exc:
                 logger.error("MemoryEvaluator failed: %s", exc, exc_info=True)
+                error_status = classify_exception(exc)
                 me_res = EvaluationResult(
                     evaluator_name=me_evaluator.name,
                     conversation_id=evaluation_input.conversation_id,
                     score=None,
                     max_score=20.0,
                     applicable=False,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,

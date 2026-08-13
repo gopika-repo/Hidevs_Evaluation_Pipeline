@@ -406,6 +406,41 @@ header {
   margin-left: 0.5rem;
 }
 
+.badge.timeout {
+  background: rgba(251, 191, 36, 0.1);
+  color: #fbbf24;
+  border: 1px solid rgba(251, 191, 36, 0.2);
+}
+
+.badge.invalid_output {
+  background: rgba(249, 115, 22, 0.1);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.2);
+}
+
+.badge.unavailable {
+  background: rgba(139, 92, 246, 0.1);
+  color: #a78bfa;
+  border: 1px solid rgba(139, 92, 246, 0.2);
+}
+
+.badge.evaluated {
+  background: rgba(16, 185, 129, 0.1);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.score-text-status {
+  font-size: 0.85rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  color: #94a3b8;
+}
+
+.score-text-status.error {
+  color: #f87171;
+}
+
 .chevron {
   transition: transform 0.2s;
   color: #64748b;

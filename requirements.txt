@@ -16,7 +16,7 @@ pydantic>=2.7,<3.0
 # ------------------------------------------------------------
 # Evaluation Frameworks
 # ------------------------------------------------------------
-deepeval>=2.0.0
+deepeval==4.1.5
 
 # Only trulens.providers.google is imported anywhere in this codebase
 # (evaluation_pipeline/evaluators/groundedness_evaluator.py). The old

@@ -102,24 +102,28 @@ class ScoreAggregator:
             max_health_convo = 0.0
             flagged_for_quality = False
             has_failures = False
+            conv_success = False
 
             # 1. Response Quality
-            if rq.status == "success":
+            if rq.status in ("success", "evaluated"):
                 raw_app_score += rq.score
                 max_health_convo += rq.max_score
                 total_rq += rq.score
                 rq_success_count += 1
+                conv_success = True
                 if rq.flagged:
                     flagged_for_quality = True
-            elif rq.status == "failed":
+            else:
+                max_health_convo += rq.max_score
                 has_failures = True
 
             # 2. Groundedness
-            if gd.status == "success":
+            if gd.status in ("success", "evaluated"):
                 raw_app_score += gd.score
                 max_health_convo += gd.max_score
                 total_gd += gd.score
                 gd_success_count += 1
+                conv_success = True
                 if gd.flagged:
                     flagged_for_quality = True
                 
@@ -127,45 +131,54 @@ class ScoreAggregator:
                     gd_cb_scores.append(gd.score)
                 else:
                     gd_cf_scores.append(gd.score)
-            elif gd.status == "failed":
+            else:
+                max_health_convo += gd.max_score
                 has_failures = True
 
             # 3. Safety
-            if safety.status == "success":
+            if safety.status in ("success", "evaluated"):
                 raw_app_score += safety.score
                 max_health_convo += safety.max_score
                 total_safety += safety.score
                 safety_success_count += 1
+                conv_success = True
                 if safety.flagged:
                     flagged_for_quality = True
-            elif safety.status == "failed":
+            else:
+                max_health_convo += safety.max_score
                 has_failures = True
 
             # 4. Intent Understanding
             if intent:
-                if intent.status == "success":
+                if intent.status in ("success", "evaluated"):
                     raw_app_score += intent.score
                     max_health_convo += intent.max_score
                     total_intent += intent.score
                     intent_success_count += 1
+                    conv_success = True
                     if intent.flagged:
                         flagged_for_quality = True
-                elif intent.status == "failed":
+                else:
+                    max_health_convo += intent.max_score
                     has_failures = True
+
             # 5. Memory
             if memory:
-                if memory.applicable and memory.status in ("success", "evaluated"):
-                    raw_app_score += memory.score
+                if memory.status in ("success", "evaluated"):
+                    if memory.applicable:
+                        raw_app_score += memory.score
+                        max_health_convo += memory.max_score
+                        total_memory += memory.score
+                        memory_applicable_success_count += 1
+                        conv_success = True
+                        if memory.flagged:
+                            flagged_for_quality = True
+                elif memory.status != "not_applicable":
                     max_health_convo += memory.max_score
-                    total_memory += memory.score
-                    memory_applicable_success_count += 1
-                    if memory.flagged:
-                        flagged_for_quality = True
-                elif memory.status == "failed":
                     has_failures = True
 
             # Calculate health score if any evaluators succeeded
-            if max_health_convo > 0.0:
+            if max_health_convo > 0.0 and conv_success:
                 overall_health_score = round((raw_app_score / max_health_convo) * 100.0, 2)
                 total_normalized_health += overall_health_score
                 health_success_count += 1

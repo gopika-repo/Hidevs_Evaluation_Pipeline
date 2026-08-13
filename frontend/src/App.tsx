@@ -48,8 +48,23 @@ interface EvaluationReport {
       [key: string]: number | null;
     };
   };
-  conversations: ConversationEvaluation[];
 }
+
+const renderScoreDisplay = (score: number | null, maxScore: number, status: string) => {
+  if (status === 'success' || status === 'evaluated') {
+    return <>{score !== null ? score : '0'} <span>/ {maxScore}</span></>;
+  }
+  if (status === 'not_applicable') {
+    return <span className="score-text-status">NOT APPLICABLE</span>;
+  }
+  const statusLabels: { [key: string]: string } = {
+    failed: 'FAILED',
+    timeout: 'TIMED OUT',
+    invalid_output: 'INVALID OUTPUT',
+    unavailable: 'UNAVAILABLE',
+  };
+  return <span className="score-text-status error">{statusLabels[status] || status.toUpperCase()}</span>;
+};
 
 function App() {
   // Form states
@@ -386,7 +401,7 @@ function App() {
                       </div>
                       <div className="card-header-right">
                         <div className="card-score">
-                          {rq.score !== null ? rq.score : 'N/A'} <span>/ {rq.max_score}</span>
+                          {renderScoreDisplay(rq.score, rq.max_score, rq.status)}
                         </div>
                         <svg className={`chevron ${expandedCards.response_quality ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="6 9 12 15 18 9" />
@@ -435,7 +450,7 @@ function App() {
                       </div>
                       <div className="card-header-right">
                         <div className="card-score">
-                          {gd.score !== null ? gd.score : 'N/A'} <span>/ {gd.max_score}</span>
+                          {renderScoreDisplay(gd.score, gd.max_score, gd.status)}
                         </div>
                         <svg className={`chevron ${expandedCards.groundedness ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="6 9 12 15 18 9" />
@@ -504,7 +519,7 @@ function App() {
                       </div>
                       <div className="card-header-right">
                         <div className="card-score">
-                          {sf.score !== null ? sf.score : 'N/A'} <span>/ {sf.max_score}</span>
+                          {renderScoreDisplay(sf.score, sf.max_score, sf.status)}
                         </div>
                         <svg className={`chevron ${expandedCards.safety ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="6 9 12 15 18 9" />
@@ -580,7 +595,7 @@ function App() {
                       </div>
                       <div className="card-header-right">
                         <div className="card-score">
-                          {it.score !== null ? it.score : 'N/A'} <span>/ {it.max_score}</span>
+                          {renderScoreDisplay(it.score, it.max_score, it.status)}
                         </div>
                         <svg className={`chevron ${expandedCards.intent_understanding ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="6 9 12 15 18 9" />
@@ -643,20 +658,19 @@ function App() {
                 const me = currentConvo.evaluations.memory_and_continuity;
                 if (!me) return null;
 
-                const isApp = me.applicable !== false;
-                const scoreDisplay = isApp ? (me.score !== null ? me.score : 'N/A') : 'N/A';
-                const statusBadgeText = isApp ? me.status : 'not_applicable';
+                const statusBadgeText = me.status;
+                const badgeClass = me.status === 'evaluated' || me.status === 'success' ? 'success' : me.status;
 
                 return (
                   <div className="evaluator-card">
                     <div className="card-header" onClick={() => toggleCard('memory_and_continuity')}>
                       <div className="card-header-left">
-                        <span className={`badge ${isApp ? 'success' : 'not_applicable'}`}>{statusBadgeText}</span>
+                        <span className={`badge ${badgeClass}`}>{statusBadgeText}</span>
                         <h3>Memory & Continuity</h3>
                       </div>
                       <div className="card-header-right">
                         <div className="card-score">
-                          {scoreDisplay} <span>/ {me.max_score}</span>
+                          {renderScoreDisplay(me.score, me.max_score, me.status)}
                         </div>
                         <svg className={`chevron ${expandedCards.memory_and_continuity ? 'open' : ''}`} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                           <polyline points="6 9 12 15 18 9" />

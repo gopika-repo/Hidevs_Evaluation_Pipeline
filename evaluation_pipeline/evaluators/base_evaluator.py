@@ -12,6 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 
 from evaluation_pipeline.data.models import EvaluationInput, EvaluationResult
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +98,13 @@ class BaseEvaluator(ABC):
                     exc_info=True,
                 )
                 # Return a flagged error result rather than crashing the batch
+                error_status = classify_exception(exc)
                 error_result = EvaluationResult(
                     evaluator_name=self.name,
                     conversation_id=eval_input.conversation_id,
                     score=None,
                     max_score=20.0,
-                    status="failed",
+                    status=error_status,
                     sub_scores={},
                     feedback=f"Evaluation failed with error: {exc}",
                     flagged=True,

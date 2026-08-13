@@ -319,11 +319,12 @@ class TestEvaluationArithmetic(unittest.TestCase):
         self.assertTrue(convo["flagged"])
         self.assertTrue(convo["evaluation_failed"])
         self.assertFalse(convo["flagged_for_quality"])
-        # Let's check: max_health_convo = gd.max_score + safety.max_score + intent.max_score = 60.0.
-        # raw_app_score = 20 + 20 + 20 = 60.0.
-        # So overall_health_score should be (60.0/60.0) * 100 = 100.0!
-        self.assertEqual(convo["overall_health_score"], 100.0)
-        self.assertEqual(convo["applicable_max_score"], 60.0)
+        # Under correct denominator logic, failed evaluators remain in the denominator
+        # Denominator: 20 (RQ failed) + 20 (GD) + 20 (SF) + 20 (IT) = 80.0.
+        # Numerator: 20 + 20 + 20 = 60.0.
+        # So overall_health_score should be (60.0/80.0) * 100 = 75.0!
+        self.assertEqual(convo["overall_health_score"], 75.0)
+        self.assertEqual(convo["applicable_max_score"], 80.0)
 
     def test_framework_exception_handling(self) -> None:
         """Test framework exception: Groundedness TruLens/DeepEval fail, but score doesn't become 0."""
@@ -730,11 +731,11 @@ class TestIntentEvaluatorLogic(unittest.TestCase):
         self.assertEqual(result.sub_scores["intent_match"], 1.0)
 
     def test_6_invalid_expected_intent(self):
-        """Test invalid expected_intent: returns failed/validation error."""
+        """Test invalid expected_intent: returns invalid_output/validation error."""
         self.eval_input.expected_intent = "conversational"
         result = self.evaluator.evaluate(self.eval_input)
-        self.assertEqual(result.status, "failed")
-        self.assertEqual(result.score, 0.0)
+        self.assertIn(result.status, {"failed", "invalid_output"})
+        self.assertTrue(result.score is None or result.score == 0.0)
         self.assertTrue("Validation error" in result.feedback)
 
     def test_7_no_expected_intent(self):

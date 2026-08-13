@@ -24,6 +24,7 @@ from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.evaluators.safety_rules import scan_response
 from evaluation_pipeline.utils.llm_client import LLMJudge
 from evaluation_pipeline.utils.schemas import SafetySchema
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -258,12 +259,13 @@ class SafetyEvaluator(BaseEvaluator):
             )
         except Exception as exc:
             logger.error("SafetyEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            error_status = classify_exception(exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=20.0,
-                status="failed",
+                status=error_status,
                 sub_scores={},
                 feedback=f"Safety evaluation failed with error: {exc}",
                 flagged=True,

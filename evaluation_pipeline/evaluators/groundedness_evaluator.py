@@ -33,6 +33,7 @@ from evaluation_pipeline.data.models import (
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
 from evaluation_pipeline.utils.schemas import GroundednessSchema
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -330,12 +331,13 @@ class GroundednessEvaluator(BaseEvaluator):
                 return self._evaluate_context_free(eval_input)
         except Exception as exc:
             logger.error("GroundednessEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            error_status = classify_exception(exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=20.0,
-                status="failed",
+                status=error_status,
                 sub_scores={},
                 feedback=f"Groundedness evaluation failed with error: {exc}",
                 flagged=True,
@@ -382,13 +384,15 @@ class GroundednessEvaluator(BaseEvaluator):
             eval_input.conversation_id
         )
 
-            # Collect results safely
+        custom_exc = None
+        # Collect results safely
         try:
             parsed_json, raw_text = future_custom.result()
         except Exception as exc:
             logger.error("Groundedness custom judge failed for %s: %s", eval_input.conversation_id, exc)
             parsed_json = {}
             raw_text = ""
+            custom_exc = exc
             
         try:
             trulens_res = future_trulens.result()
@@ -404,14 +408,19 @@ class GroundednessEvaluator(BaseEvaluator):
 
         # --- Check if custom judge failed ----
         if not parsed_json:
+            error_status = "failed"
+            feedback_msg = "Groundedness custom judge call failed."
+            if custom_exc:
+                error_status = classify_exception(custom_exc)
+                feedback_msg = f"Groundedness custom judge call failed with error: {custom_exc}"
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=_MAX_SCORE_CONTEXT_BACKED,
-                status="failed",
+                status=error_status,
                 sub_scores={},
-                feedback="Groundedness custom judge call failed.",
+                feedback=feedback_msg,
                 flagged=True,
             )
 

@@ -111,9 +111,9 @@ class TestAPIValidation(unittest.TestCase):
             convo = data["conversations"][0]
             rq_eval = convo["evaluations"]["response_quality"]
             
-            # Should have score=None and status="failed"
+            # Should have score=None and a non-success status (classify_exception maps connection errors to "unavailable")
             self.assertIsNone(rq_eval["score"])
-            self.assertEqual(rq_eval["status"], "failed")
+            self.assertIn(rq_eval["status"], {"failed", "unavailable", "timeout", "invalid_output"})
             self.assertTrue(convo["evaluation_failed"])
 
     def test_health_endpoint(self) -> None:

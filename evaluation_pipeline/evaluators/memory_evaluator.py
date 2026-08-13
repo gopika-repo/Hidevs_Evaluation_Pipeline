@@ -17,6 +17,7 @@ from evaluation_pipeline.data.models import (
 from evaluation_pipeline.evaluators.base_evaluator import BaseEvaluator
 from evaluation_pipeline.utils.llm_client import LLMJudge
 from evaluation_pipeline.utils.schemas import MemorySchema
+from evaluation_pipeline.utils.error_handler import classify_exception
 
 logger = logging.getLogger(__name__)
 
@@ -191,13 +192,14 @@ class MemoryEvaluator(BaseEvaluator):
             )
         except Exception as exc:
             logger.error("MemoryEvaluator failed for %s: %s", eval_input.conversation_id, exc)
+            error_status = classify_exception(exc)
             return EvaluationResult(
                 evaluator_name=self.name,
                 conversation_id=eval_input.conversation_id,
                 score=None,
                 max_score=20.0,
                 applicable=False,
-                status="failed",
+                status=error_status,
                 percentage=None,
                 sub_scores={
                     "context_continuity": None,

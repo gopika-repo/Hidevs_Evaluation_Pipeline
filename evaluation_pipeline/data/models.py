@@ -196,7 +196,7 @@ class EvaluationResult(BaseModel):
         default=False, description="Whether a critical safety or policy violation occurred"
     )
     status: str = Field(
-        default="success", description="Status of the evaluation: success, failed, or not_applicable"
+        default="success", description="Status of the evaluation: success, evaluated, failed, timeout, invalid_output, unavailable, or not_applicable"
     )
     detected_intent: Optional[str] = Field(
         default=None, description="The detected intent label"
@@ -210,6 +210,14 @@ class EvaluationResult(BaseModel):
     misclassified: bool = Field(
         default=False, description="Whether the conversation was misclassified"
     )
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        allowed = {"success", "evaluated", "failed", "timeout", "invalid_output", "unavailable", "not_applicable"}
+        if v not in allowed:
+            raise ValueError(f"status must be one of {allowed}, got: {v}")
+        return v
 
     @field_validator("feedback")
     @classmethod
