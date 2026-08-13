@@ -132,6 +132,7 @@ class IntentEvaluator(BaseEvaluator):
                 evaluator=self.name,
                 conversation_id=eval_input.conversation_id,
                 response_schema=IntentSchema,
+                deadline=eval_input.deadline,
             )
 
             if not parsed_json:

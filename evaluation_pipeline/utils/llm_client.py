@@ -155,6 +155,7 @@ class LLMJudge:
         evaluator: str = "unknown",
         conversation_id: str = "unknown",
         response_schema: type[BaseModel] | None = None,
+        deadline: float | None = None,
     ) -> tuple[dict[str, Any], str]:
         """
         Call the LLM and parse structured JSON from its response.
@@ -162,6 +163,22 @@ class LLMJudge:
         """
         from evaluation_pipeline.utils.concurrency import controlled_concurrency
         from evaluation_pipeline.utils.retry_utils import execute_with_retry
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        # Calculate dynamic request timeout based on remaining deadline
+        api_timeout = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
+        if deadline is not None:
+            remaining = deadline - time.time()
+            api_timeout = max(1.0, min(api_timeout, remaining))
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        local_llm = ChatGoogleGenerativeAI(
+            model=self.model_name,
+            google_api_key=api_key,
+            temperature=_DEFAULT_TEMPERATURE,
+            max_output_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=api_timeout,
+        )
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -174,7 +191,7 @@ class LLMJudge:
         if response_schema:
             try:
                 # Bind response schema to LLM
-                structured_llm = self.llm.with_structured_output(response_schema, method="json_schema")
+                structured_llm = local_llm.with_structured_output(response_schema, method="json_schema")
                 
                 def _invoke_structured():
                     with controlled_concurrency(evaluator, "Gemini API (Structured)", conversation_id):
@@ -186,7 +203,8 @@ class LLMJudge:
                     framework="Gemini API (Structured)",
                     conversation_id=conversation_id,
                     max_retries=_MAX_RETRIES,
-                    initial_delay=_RETRY_BACKOFF_BASE
+                    initial_delay=_RETRY_BACKOFF_BASE,
+                    deadline=deadline,
                 )
                 
                 if response_obj is not None:
@@ -208,7 +226,7 @@ class LLMJudge:
         # 2. Fallback to raw text + regex JSON extraction
         def _invoke_api():
             with controlled_concurrency(evaluator, "Gemini API", conversation_id):
-                return self.llm.invoke(messages)
+                return local_llm.invoke(messages)
 
         try:
             response = execute_with_retry(
@@ -217,7 +235,8 @@ class LLMJudge:
                 framework="Gemini API",
                 conversation_id=conversation_id,
                 max_retries=_MAX_RETRIES,
-                initial_delay=_RETRY_BACKOFF_BASE
+                initial_delay=_RETRY_BACKOFF_BASE,
+                deadline=deadline,
             )
             raw_text = self._convert_to_string(response.content)
             
@@ -262,12 +281,29 @@ class LLMJudge:
         user_prompt: str,
         evaluator: str = "unknown",
         conversation_id: str = "unknown",
+        deadline: float | None = None,
     ) -> str:
         """
         Call the LLM and return the raw text response (no JSON parsing).
         """
         from evaluation_pipeline.utils.concurrency import controlled_concurrency
         from evaluation_pipeline.utils.retry_utils import execute_with_retry
+        from langchain_google_genai import ChatGoogleGenerativeAI
+
+        # Calculate dynamic request timeout based on remaining deadline
+        api_timeout = float(os.getenv("GEMINI_TIMEOUT", "30.0"))
+        if deadline is not None:
+            remaining = deadline - time.time()
+            api_timeout = max(1.0, min(api_timeout, remaining))
+
+        api_key = os.getenv("GOOGLE_API_KEY")
+        local_llm = ChatGoogleGenerativeAI(
+            model=self.model_name,
+            google_api_key=api_key,
+            temperature=_DEFAULT_TEMPERATURE,
+            max_output_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=api_timeout,
+        )
 
         messages = [
             SystemMessage(content=system_prompt),
@@ -276,7 +312,7 @@ class LLMJudge:
 
         def _invoke_api():
             with controlled_concurrency(evaluator, "Gemini API", conversation_id):
-                return self.llm.invoke(messages)
+                return local_llm.invoke(messages)
 
         start_time = time.time()
         try:
@@ -286,7 +322,8 @@ class LLMJudge:
                 framework="Gemini API",
                 conversation_id=conversation_id,
                 max_retries=_MAX_RETRIES,
-                initial_delay=_RETRY_BACKOFF_BASE
+                initial_delay=_RETRY_BACKOFF_BASE,
+                deadline=deadline,
             )
             raw_text = self._convert_to_string(response.content)
 

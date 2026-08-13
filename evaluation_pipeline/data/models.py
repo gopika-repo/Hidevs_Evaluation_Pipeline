@@ -140,6 +140,7 @@ class EvaluationInput(BaseModel):
     conversation_type: ConversationType = Field(
         ..., description="Auto-tagged based on retrieved_context presence"
     )
+    deadline: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------

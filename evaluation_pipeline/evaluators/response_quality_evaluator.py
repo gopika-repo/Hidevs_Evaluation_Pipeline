@@ -142,6 +142,7 @@ class ResponseQualityEvaluator(BaseEvaluator):
                 evaluator=self.name,
                 conversation_id=eval_input.conversation_id,
                 response_schema=ResponseQualitySchema,
+                deadline=eval_input.deadline,
             )
 
             if not parsed_json:

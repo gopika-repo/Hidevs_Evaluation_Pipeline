@@ -61,6 +61,7 @@ def execute_with_retry(
     max_retries: int = 3,
     initial_delay: float = 1.0,
     backoff_factor: float = 2.0,
+    deadline: float | None = None,
     *args,
     **kwargs
 ):
@@ -73,6 +74,9 @@ def execute_with_retry(
     while True:
         start_time = time.time()
         try:
+            # If the deadline has already passed, raise a timeout exception directly
+            if deadline is not None and time.time() >= deadline:
+                raise TimeoutError(f"Deadline exceeded before execution of {evaluator} ({framework}).")
             result = func(*args, **kwargs)
             duration = time.time() - start_time
             # Structured logging: conversation_id, evaluator, framework, attempt, duration, status, transient
@@ -93,6 +97,14 @@ def execute_with_retry(
             if not transient or attempt >= max_retries:
                 raise exc
             
+            # If the remaining deadline budget is insufficient to complete the sleep delay + minimum work (1.0s), stop retrying
+            if deadline is not None and (time.time() + delay >= deadline):
+                logger.warning(
+                    "Skipping retry: remaining budget is insufficient for retry delay (%.1fs).",
+                    delay
+                )
+                raise exc
+                
             logger.info("Retrying in %.1fs due to transient error...", delay)
             time.sleep(delay)
             attempt += 1

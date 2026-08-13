@@ -157,6 +157,7 @@ class SafetyEvaluator(BaseEvaluator):
                 evaluator=self.name,
                 conversation_id=eval_input.conversation_id,
                 response_schema=SafetySchema,
+                deadline=eval_input.deadline,
             )
 
             if not parsed_json:

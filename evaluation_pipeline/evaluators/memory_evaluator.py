@@ -119,6 +119,7 @@ class MemoryEvaluator(BaseEvaluator):
                 evaluator=self.name,
                 conversation_id=eval_input.conversation_id,
                 response_schema=MemorySchema,
+                deadline=eval_input.deadline,
             )
 
             if not parsed_json:

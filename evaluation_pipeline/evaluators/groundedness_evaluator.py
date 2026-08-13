@@ -171,7 +171,7 @@ Score each dimension 1–5 (5 = good, no issues). Return ONLY valid JSON.
 # ---------------------------------------------------------------------------
 
 def _run_trulens_groundedness(
-    context: str, response: str, conversation_id: str = "unknown"
+    context: str, response: str, conversation_id: str = "unknown", deadline: float | None = None
 ) -> dict[str, Any]:
     """
     Run TruLens groundedness evaluation using native Google provider with controlled concurrency, retries, and timeout.
@@ -188,6 +188,9 @@ def _run_trulens_groundedness(
     import concurrent.futures
 
     trulens_timeout = float(os.getenv("TRULENS_TIMEOUT", "45.0"))
+    if deadline is not None:
+        remaining = deadline - time.time()
+        trulens_timeout = max(1.0, min(trulens_timeout, remaining))
 
     def _call_trulens():
         from trulens.providers.google import Google
@@ -215,7 +218,8 @@ def _run_trulens_groundedness(
             framework="TruLens",
             conversation_id=conversation_id,
             max_retries=3,
-            initial_delay=2.0
+            initial_delay=2.0,
+            deadline=deadline,
         )
         return {
             "status": "success",
@@ -230,7 +234,7 @@ def _run_trulens_groundedness(
 
 
 def _run_deepeval_faithfulness(
-    user_query: str, response: str, context: str, conversation_id: str = "unknown"
+    user_query: str, response: str, context: str, conversation_id: str = "unknown", deadline: float | None = None
 ) -> dict[str, Any]:
     """
     Run DeepEval faithfulness evaluation using GeminiModel with controlled concurrency, retries, and timeout.
@@ -247,6 +251,9 @@ def _run_deepeval_faithfulness(
     import concurrent.futures
 
     deepeval_timeout = float(os.getenv("DEEPEVAL_TIMEOUT", "45.0"))
+    if deadline is not None:
+        remaining = deadline - time.time()
+        deepeval_timeout = max(1.0, min(deepeval_timeout, remaining))
 
     def _call_deepeval():
         from deepeval.metrics import FaithfulnessMetric
@@ -286,7 +293,8 @@ def _run_deepeval_faithfulness(
             framework="DeepEval",
             conversation_id=conversation_id,
             max_retries=3,
-            initial_delay=2.0
+            initial_delay=2.0,
+            deadline=deadline,
         )
         return {
             "status": "success",
@@ -369,39 +377,49 @@ class GroundednessEvaluator(BaseEvaluator):
         parsed_json: dict[str, Any] = {}
         raw_text: str = ""
 
-        # Submit all three evaluations to the shared executor
+        deadline = eval_input.deadline
+
+        # Submit all three evaluations to the shared executor, passing the request deadline
         future_custom = _shared_executor.submit(
             self._run_custom_context_backed_judge, eval_input
         )
         future_trulens = _shared_executor.submit(
-            _run_trulens_groundedness, context, response, eval_input.conversation_id
+            _run_trulens_groundedness, context, response, eval_input.conversation_id, deadline
         )
         future_deepeval = _shared_executor.submit(
             _run_deepeval_faithfulness,
             eval_input.user_query,
             response,
             context,
-            eval_input.conversation_id
+            eval_input.conversation_id,
+            deadline
         )
 
         custom_exc = None
-        # Collect results safely
+        # Collect results safely with remaining time budget limits
+        remaining = None
+        if deadline is not None:
+            remaining = max(1.0, deadline - time.time())
         try:
-            parsed_json, raw_text = future_custom.result()
+            parsed_json, raw_text = future_custom.result(timeout=remaining)
         except Exception as exc:
             logger.error("Groundedness custom judge failed for %s: %s", eval_input.conversation_id, exc)
             parsed_json = {}
             raw_text = ""
             custom_exc = exc
             
+        if deadline is not None:
+            remaining = max(1.0, deadline - time.time())
         try:
-            trulens_res = future_trulens.result()
+            trulens_res = future_trulens.result(timeout=remaining)
         except Exception as exc:
             logger.error("Groundedness TruLens failed for %s: %s", eval_input.conversation_id, exc)
             trulens_res = {"status": "failed", "error": str(exc)}
             
+        if deadline is not None:
+            remaining = max(1.0, deadline - time.time())
         try:
-            deepeval_res = future_deepeval.result()
+            deepeval_res = future_deepeval.result(timeout=remaining)
         except Exception as exc:
             logger.error("Groundedness DeepEval failed for %s: %s", eval_input.conversation_id, exc)
             deepeval_res = {"status": "failed", "error": str(exc)}
@@ -505,6 +523,7 @@ class GroundednessEvaluator(BaseEvaluator):
             evaluator=self.name,
             conversation_id=eval_input.conversation_id,
             response_schema=GroundednessSchema,
+            deadline=eval_input.deadline,
         )
 
     @staticmethod
@@ -591,6 +610,7 @@ class GroundednessEvaluator(BaseEvaluator):
             evaluator=self.name,
             conversation_id=eval_input.conversation_id,
             response_schema=GroundednessSchema,
+            deadline=eval_input.deadline,
         )
 
         if not parsed_json:

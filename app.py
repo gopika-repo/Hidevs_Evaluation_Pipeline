@@ -79,6 +79,11 @@ def run_evaluation(record: ConversationRecord):
     
     evaluation_input = inputs[0]
     
+    import time
+    request_timeout = float(os.getenv("EVALUATION_REQUEST_TIMEOUT", "45.0"))
+    deadline = time.time() + request_timeout
+    evaluation_input.deadline = deadline
+
     try:
         # 2. Run evaluators concurrently with timeouts
         rq_evaluator = ResponseQualityEvaluator()
@@ -96,7 +101,8 @@ def run_evaluation(record: ConversationRecord):
             
             # Response Quality
             try:
-                rq_res = future_rq.result(timeout=45.0)
+                remaining = max(1.0, deadline - time.time())
+                rq_res = future_rq.result(timeout=remaining)
             except Exception as exc:
                 logger.error("ResponseQualityEvaluator failed: %s", exc, exc_info=True)
                 error_status = classify_exception(exc)
@@ -113,7 +119,8 @@ def run_evaluation(record: ConversationRecord):
 
             # Groundedness
             try:
-                gd_res = future_gd.result(timeout=45.0)
+                remaining = max(1.0, deadline - time.time())
+                gd_res = future_gd.result(timeout=remaining)
             except Exception as exc:
                 logger.error("GroundednessEvaluator failed: %s", exc, exc_info=True)
                 error_status = classify_exception(exc)
@@ -130,7 +137,8 @@ def run_evaluation(record: ConversationRecord):
 
             # Safety
             try:
-                sf_res = future_sf.result(timeout=45.0)
+                remaining = max(1.0, deadline - time.time())
+                sf_res = future_sf.result(timeout=remaining)
             except Exception as exc:
                 logger.error("SafetyEvaluator failed: %s", exc, exc_info=True)
                 error_status = classify_exception(exc)
@@ -147,7 +155,8 @@ def run_evaluation(record: ConversationRecord):
 
             # Intent
             try:
-                it_res = future_it.result(timeout=45.0)
+                remaining = max(1.0, deadline - time.time())
+                it_res = future_it.result(timeout=remaining)
             except Exception as exc:
                 logger.error("IntentEvaluator failed: %s", exc, exc_info=True)
                 error_status = classify_exception(exc)
@@ -164,7 +173,8 @@ def run_evaluation(record: ConversationRecord):
 
             # Memory
             try:
-                me_res = future_me.result(timeout=45.0)
+                remaining = max(1.0, deadline - time.time())
+                me_res = future_me.result(timeout=remaining)
             except Exception as exc:
                 logger.error("MemoryEvaluator failed: %s", exc, exc_info=True)
                 error_status = classify_exception(exc)
