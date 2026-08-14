@@ -41,20 +41,34 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Shared executor
+# Executors
 # ---------------------------------------------------------------------------
 
-# Used by:
-#   1. Groundedness custom judge
-#   2. TruLens comparison evaluation
-#   3. DeepEval comparison evaluation
+# IMPORTANT:
+# Existing groundedness tests patch:
 #
-# TruLens and DeepEval each submit their actual framework work to this
-# executor and then wait using Future.result(timeout=...).
+#   evaluation_pipeline.evaluators.groundedness_evaluator._shared_executor.submit
 #
-# This is intentionally kept as a module-level executor because the test
-# suite patches _shared_executor.submit to verify timeout behaviour.
-_shared_executor = ThreadPoolExecutor(max_workers=32)
+# Therefore TruLens and DeepEval MUST use _shared_executor.
+#
+# This executor is reserved for actual framework calls.
+_shared_executor = ThreadPoolExecutor(
+    max_workers=4,
+    thread_name_prefix="groundedness-framework",
+)
+
+
+# Separate executor for orchestration of:
+#   - custom judge
+#   - TruLens wrapper
+#   - DeepEval wrapper
+#
+# This prevents the outer orchestration layer from consuming the same
+# worker threads needed by the framework futures.
+_orchestration_executor = ThreadPoolExecutor(
+    max_workers=8,
+    thread_name_prefix="groundedness-orchestration",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -261,20 +275,25 @@ def _calculate_framework_timeout(
     """
     Calculate a bounded timeout for TruLens / DeepEval.
 
-    Important:
-    A very small remaining deadline is floored to 0.05 seconds.
-
-    Example:
-        deadline - time.time() = 0.01
-
-    becomes:
-
-        timeout = 0.05
-
-    This behaviour is required by the groundedness timeout tests.
+    A very small remaining deadline is floored to 0.05 seconds because
+    the test suite explicitly verifies this behaviour.
     """
+    try:
+        timeout = float(
+            os.getenv(
+                env_name,
+                str(default),
+            )
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid {env_name} value."
+        ) from exc
 
-    timeout = float(os.getenv(env_name, str(default)))
+    if timeout <= 0:
+        raise ValueError(
+            f"{env_name} must be greater than 0."
+        )
 
     if deadline is None:
         return timeout
@@ -283,7 +302,10 @@ def _calculate_framework_timeout(
 
     return min(
         timeout,
-        max(_MIN_FRAMEWORK_TIMEOUT, remaining),
+        max(
+            _MIN_FRAMEWORK_TIMEOUT,
+            remaining,
+        ),
     )
 
 
@@ -301,8 +323,7 @@ def _run_trulens_groundedness(
     Run TruLens groundedness evaluation.
 
     TruLens is a comparison metric only.
-
-    Its result does NOT contribute to the official groundedness score.
+    It does NOT contribute to the official groundedness score.
     """
 
     if not context or not context.strip():
@@ -324,15 +345,12 @@ def _run_trulens_groundedness(
         deadline=deadline,
     )
 
-    def _invoke_trulens() -> float:
+    def framework_call() -> float:
         """
         Actual TruLens execution.
 
-        IMPORTANT:
-        All expensive/provider initialization happens INSIDE the submitted
-        future. This ensures the test can observe _shared_executor.submit().
+        This function executes INSIDE _shared_executor.
         """
-
         from trulens.providers.google import Google
 
         model_name = os.getenv(
@@ -365,21 +383,24 @@ def _run_trulens_groundedness(
         if isinstance(score, tuple):
             score = score[0]
 
-        return float(score)
+        score = float(score)
 
-    def _call_trulens_with_timeout() -> float:
+        if not 0.0 <= score <= 1.0:
+            raise ValueError(
+                f"TruLens returned out-of-range score: {score}"
+            )
+
+        return score
+
+    def invoke_with_timeout() -> float:
         """
-        Submit TruLens to the shared executor and enforce timeout.
+        Submit the framework call to the shared framework executor and
+        enforce the framework-specific timeout.
 
-        DO NOT remove this executor layer.
-
-        The groundedness framework tests explicitly verify:
-            _shared_executor.submit(...)
-            future.result(timeout=0.05)
+        Existing tests intentionally patch _shared_executor.submit().
         """
-
         future = _shared_executor.submit(
-            _invoke_trulens
+            framework_call
         )
 
         return float(
@@ -390,7 +411,7 @@ def _run_trulens_groundedness(
 
     try:
         score = execute_with_retry(
-            _call_trulens_with_timeout,
+            invoke_with_timeout,
             evaluator="groundedness",
             framework="TruLens",
             conversation_id=conversation_id,
@@ -432,8 +453,7 @@ def _run_deepeval_faithfulness(
     Run DeepEval Faithfulness evaluation.
 
     DeepEval is a comparison metric only.
-
-    Its result does NOT contribute to the official groundedness score.
+    It does NOT contribute to the official groundedness score.
     """
 
     if not context or not context.strip():
@@ -455,13 +475,12 @@ def _run_deepeval_faithfulness(
         deadline=deadline,
     )
 
-    def _invoke_deepeval() -> float:
+    def framework_call() -> float:
         """
         Actual DeepEval execution.
 
-        Everything is created inside the executor worker.
+        This function executes INSIDE _shared_executor.
         """
-
         from deepeval.metrics import FaithfulnessMetric
         from deepeval.models import GeminiModel
         from deepeval.test_case import LLMTestCase
@@ -509,32 +528,32 @@ def _run_deepeval_faithfulness(
                 "DeepEval returned no score."
             )
 
-        if not isinstance(score, (int, float)):
+        if not isinstance(
+            score,
+            (int, float),
+        ):
             raise ValueError(
-                "DeepEval returned an invalid score type: "
+                "DeepEval returned invalid score type: "
                 f"{type(score).__name__}"
             )
 
-        score_float = float(score)
+        score = float(score)
 
-        if not 0.0 <= score_float <= 1.0:
+        if not 0.0 <= score <= 1.0:
             raise ValueError(
-                "DeepEval returned out-of-range score: "
-                f"{score_float}"
+                f"DeepEval returned out-of-range score: {score}"
             )
 
-        return score_float
+        return score
 
-    def _call_deepeval_with_timeout() -> float:
+    def invoke_with_timeout() -> float:
         """
-        Submit DeepEval to the shared executor and enforce timeout.
+        Submit DeepEval to _shared_executor and enforce timeout.
 
-        This is intentionally kept because the framework timeout tests
-        patch _shared_executor.submit and verify Future.result(timeout=...).
+        Existing tests patch _shared_executor.submit().
         """
-
         future = _shared_executor.submit(
-            _invoke_deepeval
+            framework_call
         )
 
         return float(
@@ -545,7 +564,7 @@ def _run_deepeval_faithfulness(
 
     try:
         score = execute_with_retry(
-            _call_deepeval_with_timeout,
+            invoke_with_timeout,
             evaluator="groundedness",
             framework="DeepEval",
             conversation_id=conversation_id,
@@ -587,7 +606,8 @@ class GroundednessEvaluator(BaseEvaluator):
 
     Context-free:
         - Custom LLM judge
-        - External frameworks marked not_applicable
+        - TruLens not applicable
+        - DeepEval not applicable
     """
 
     name: str = "groundedness"
@@ -600,17 +620,13 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
     # ------------------------------------------------------------------
-    # Main evaluation entry point
+    # Main evaluation
     # ------------------------------------------------------------------
 
     def evaluate(
         self,
         eval_input: EvaluationInput,
     ) -> EvaluationResult:
-        """
-        Dispatch evaluation according to conversation type.
-        """
-
         try:
             if (
                 eval_input.conversation_type
@@ -657,18 +673,6 @@ class GroundednessEvaluator(BaseEvaluator):
         self,
         eval_input: EvaluationInput,
     ) -> EvaluationResult:
-        """
-        Evaluate a context-backed conversation.
-
-        Three evaluations run independently:
-
-        1. Custom LLM judge
-        2. TruLens
-        3. DeepEval
-
-        Only the custom judge contributes to the official score.
-        """
-
         logger.debug(
             "Evaluating groundedness (context-backed) for '%s'",
             eval_input.conversation_id,
@@ -680,15 +684,15 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         response = eval_input.dave_response
-
         deadline = eval_input.deadline
 
-        future_custom = _shared_executor.submit(
+        # Outer orchestration futures use the separate orchestration pool.
+        future_custom = _orchestration_executor.submit(
             self._run_custom_context_backed_judge,
             eval_input,
         )
 
-        future_trulens = _shared_executor.submit(
+        future_trulens = _orchestration_executor.submit(
             _run_trulens_groundedness,
             context,
             response,
@@ -696,7 +700,7 @@ class GroundednessEvaluator(BaseEvaluator):
             deadline,
         )
 
-        future_deepeval = _shared_executor.submit(
+        future_deepeval = _orchestration_executor.submit(
             _run_deepeval_faithfulness,
             eval_input.user_query,
             response,
@@ -866,17 +870,13 @@ class GroundednessEvaluator(BaseEvaluator):
         }
 
         # --------------------------------------------------------------
-        # TruLens comparison result
+        # External framework comparison results
         # --------------------------------------------------------------
 
         self._add_trulens_result(
             sub_scores,
             trulens_res,
         )
-
-        # --------------------------------------------------------------
-        # DeepEval comparison result
-        # --------------------------------------------------------------
 
         self._add_deepeval_result(
             sub_scores,
@@ -932,7 +932,6 @@ class GroundednessEvaluator(BaseEvaluator):
         self,
         eval_input: EvaluationInput,
     ) -> tuple[dict[str, Any], str]:
-        """Run the custom structured LLM groundedness judge."""
 
         chat_section = ""
 
@@ -974,7 +973,6 @@ class GroundednessEvaluator(BaseEvaluator):
         parsed: dict[str, Any],
         sub_scores: dict[str, Any],
     ) -> str:
-        """Build human-readable feedback."""
 
         parts: list[str] = []
 
@@ -1103,7 +1101,6 @@ class GroundednessEvaluator(BaseEvaluator):
         self,
         eval_input: EvaluationInput,
     ) -> EvaluationResult:
-        """Evaluate groundedness without retrieved context."""
 
         logger.debug(
             "Evaluating groundedness (context-free) "
@@ -1251,7 +1248,6 @@ class GroundednessEvaluator(BaseEvaluator):
         parsed: dict[str, Any],
         sub_scores: dict[str, Any],
     ) -> str:
-        """Build human-readable context-free feedback."""
 
         parts: list[str] = []
 
@@ -1331,7 +1327,6 @@ class GroundednessEvaluator(BaseEvaluator):
         sub_scores: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Add TruLens result without affecting official score."""
 
         status = result.get(
             "status"
@@ -1398,7 +1393,6 @@ class GroundednessEvaluator(BaseEvaluator):
         sub_scores: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
-        """Add DeepEval result without affecting official score."""
 
         status = result.get(
             "status"
@@ -1461,18 +1455,13 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
     # ------------------------------------------------------------------
-    # Timeout helper
+    # Remaining timeout
     # ------------------------------------------------------------------
 
     @staticmethod
     def _remaining_timeout(
         deadline: float | None,
     ) -> float | None:
-        """
-        Calculate remaining evaluator deadline.
-
-        A minimum of 0.05 seconds prevents zero/negative timeout values.
-        """
 
         if deadline is None:
             return None
@@ -1491,11 +1480,6 @@ class GroundednessEvaluator(BaseEvaluator):
         parsed: dict[str, Any],
         key: str,
     ) -> int:
-        """
-        Safely extract a 1–5 score.
-
-        Raises ValueError for missing, invalid, or out-of-range scores.
-        """
 
         entry = parsed.get(
             key
