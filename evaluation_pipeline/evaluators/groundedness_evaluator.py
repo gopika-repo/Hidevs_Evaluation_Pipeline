@@ -1,97 +1,3 @@
-"""
-Groundedness / Hallucination Evaluator — Phase 1
-
-Context-Backed
---------------
-Official score:
-    Internal Consistency -> 6
-    Overconfidence       -> 6
-    Hallucination Risk   -> 8
-
-Comparison metrics:
-    TruLens Groundedness
-    DeepEval Faithfulness
-
-TruLens and DeepEval do NOT contribute to the official score.
-
-Context-Free
-------------
-Official score:
-    Internal Consistency -> 6
-    Overconfidence       -> 6
-    Hallucination Risk   -> 8
-
-TruLens and DeepEval are not applicable.
-
-TruLens / Google GenAI compatibility
--------------------------------------
-The installed environment uses:
-
-    trulens-core              2.12.0
-    trulens-feedback          2.12.0
-    trulens-providers-google  2.12.0
-    google-genai              2.18.1
-
-The installed TruLens Google provider passes a Pydantic response model
-through Google's typed `response_schema` path.
-
-That path has produced errors such as:
-
-    Unknown name "additional_properties"
-
-and:
-
-    response_schema.required[0]: property is not defined
-
-The compatibility provider below keeps TruLens' groundedness logic but
-overrides only the Gemini completion call.
-
-When TruLens requests structured output:
-
-    1. Obtain the real Pydantic JSON schema.
-    2. Resolve local $ref / $defs references.
-    3. Validate that required fields actually exist in properties.
-    4. Send the resulting schema through Gemini's raw JSON-schema field:
-           response_json_schema
-       rather than:
-           response_schema
-
-This avoids the incompatible typed-schema conversion layer.
-
-No mock data is used.
-No API key is hardcoded.
-No evaluation score is hardcoded.
-The Gemini model is read from GEMINI_MODEL_NAME (falling back to the same
-default used by utils/llm_client.py if the environment variable is not
-explicitly set — this keeps model-name resolution CONSISTENT across the
-entire pipeline instead of this file being the only place that hard-fails
-on a missing env var).
-The API key is read from GOOGLE_API_KEY.
-
-PRODUCTION FIX APPLIED
------------------------
-Previously, _invoke_trulens() and _invoke_deepeval() each did:
-
-    model_name = os.getenv("GEMINI_MODEL_NAME")
-    if not model_name:
-        raise ValueError("GEMINI_MODEL_NAME is not configured.")
-
-This was INCONSISTENT with utils/llm_client.py, which already defines a
-safe default:
-
-    _gemini_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite")
-
-Because this file had no fallback, TruLens/DeepEval calls would hard-fail
-in any environment (e.g. Render) where GEMINI_MODEL_NAME was not
-explicitly set in that environment's variables — even though every other
-evaluator in the pipeline worked fine there via the shared default. Both
-call sites below now use the same fallback default as llm_client.py, so
-model-name resolution is uniform across the whole codebase. Explicitly
-setting GEMINI_MODEL_NAME in production is still recommended (see
-deployment notes), but a missing env var no longer causes a hard failure
-here specifically.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -134,6 +40,30 @@ except (TypeError, ValueError):
 _shared_executor = ThreadPoolExecutor(
     max_workers=_SHARED_EXECUTOR_WORKERS,
     thread_name_prefix="groundedness",
+)
+
+# Framework comparison metrics use their own executor so they never consume
+# the same worker pool used by the evaluator pipeline itself.
+#
+# This is important in production: the official groundedness judge must not
+# become blocked behind TruLens/DeepEval calls. A separate, small pool also
+# avoids nested submission/wait patterns that can starve a shared executor.
+try:
+    _FRAMEWORK_EXECUTOR_WORKERS = max(
+        2,
+        int(
+            os.getenv(
+                "GROUNDEDNESS_FRAMEWORK_EXECUTOR_WORKERS",
+                "2",
+            )
+        ),
+    )
+except (TypeError, ValueError):
+    _FRAMEWORK_EXECUTOR_WORKERS = 2
+
+_framework_executor = ThreadPoolExecutor(
+    max_workers=_FRAMEWORK_EXECUTOR_WORKERS,
+    thread_name_prefix="groundedness-framework",
 )
 
 
@@ -1060,15 +990,11 @@ def _run_trulens_groundedness(
         return score_float
 
     def _submit_and_wait() -> float:
-
-        future = _shared_executor.submit(
-            _invoke_trulens
-        )
-
+        # This helper may already be running on the dedicated framework
+        # executor. Do not submit back into another executor and wait on it;
+        # that nested pattern can starve worker pools under concurrent load.
         return float(
-            future.result(
-                timeout=timeout
-            )
+            _invoke_trulens()
         )
 
     try:
@@ -1243,15 +1169,10 @@ def _run_deepeval_faithfulness(
         return score_float
 
     def _submit_and_wait() -> float:
-
-        future = _shared_executor.submit(
-            _invoke_deepeval
-        )
-
+        # This helper may already be running on the dedicated framework
+        # executor. Avoid nested executor submission and blocking waits.
         return float(
-            future.result(
-                timeout=timeout
-            )
+            _invoke_deepeval()
         )
 
     try:
@@ -1390,47 +1311,35 @@ class GroundednessEvaluator(BaseEvaluator):
             eval_input.deadline
         )
 
-        future_custom = _shared_executor.submit(
-            self._run_custom_context_backed_judge,
-            eval_input,
-        )
-
-        future_trulens = _shared_executor.submit(
-            _run_trulens_groundedness,
-            context,
-            response,
-            eval_input.conversation_id,
-            deadline,
-        )
-
-        future_deepeval = _shared_executor.submit(
-            _run_deepeval_faithfulness,
-            eval_input.user_query,
-            response,
-            context,
-            eval_input.conversation_id,
-            deadline,
-        )
-
         parsed_json: dict[str, Any] = {}
         raw_text = ""
 
-        trulens_res: dict[str, Any] = {}
-        deepeval_res: dict[str, Any] = {}
+        trulens_res: dict[str, Any] = {
+            "status": "not_started",
+            "reason": "Comparison metric was not started.",
+        }
+        deepeval_res: dict[str, Any] = {
+            "status": "not_started",
+            "reason": "Comparison metric was not started.",
+        }
 
         custom_exc: Exception | None = None
 
         # --------------------------------------------------------------------
-        # Custom judge
+        # Custom judge — OFFICIAL SCORE PATH
+        # --------------------------------------------------------------------
+        #
+        # Run the official groundedness judge before starting TruLens or
+        # DeepEval. Those are comparison metrics only and must never be able
+        # to consume the request's critical capacity before the official
+        # result has been produced.
         # --------------------------------------------------------------------
 
         try:
 
             parsed_json, raw_text = (
-                future_custom.result(
-                    timeout=_remaining_deadline(
-                        deadline
-                    )
+                self._run_custom_context_backed_judge(
+                    eval_input
                 )
             )
 
@@ -1446,64 +1355,106 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         # --------------------------------------------------------------------
+        # Comparison metrics
+        # --------------------------------------------------------------------
+        #
+        # Only run them after the official judge has completed. They use a
+        # dedicated framework executor so they cannot starve the evaluator
+        # executor. They remain best-effort and never change the official
+        # score.
+        # --------------------------------------------------------------------
+
+        future_trulens = None
+        future_deepeval = None
+
+        if parsed_json:
+
+            future_trulens = _framework_executor.submit(
+                _run_trulens_groundedness,
+                context,
+                response,
+                eval_input.conversation_id,
+                deadline,
+            )
+
+            future_deepeval = _framework_executor.submit(
+                _run_deepeval_faithfulness,
+                eval_input.user_query,
+                response,
+                context,
+                eval_input.conversation_id,
+                deadline,
+            )
+
+        # --------------------------------------------------------------------
         # TruLens
         # --------------------------------------------------------------------
 
-        try:
+        if future_trulens is not None:
 
-            trulens_res = (
-                future_trulens.result(
-                    timeout=_remaining_deadline(
-                        deadline
-                    )
+            try:
+
+                trulens_timeout = _remaining_deadline(
+                    deadline
                 )
-            )
 
-        except Exception as exc:
+                if trulens_timeout is None:
+                    trulens_timeout = _DEFAULT_TRULENS_TIMEOUT
 
-            logger.error(
-                "Groundedness TruLens failed "
-                "for %s: %s",
-                eval_input.conversation_id,
-                exc,
-            )
+                trulens_res = future_trulens.result(
+                    timeout=trulens_timeout
+                )
 
-            trulens_res = {
-                "status": "failed",
-                "error": str(
-                    exc
-                ),
-            }
+            except Exception as exc:
+
+                logger.error(
+                    "Groundedness TruLens failed "
+                    "for %s: %s",
+                    eval_input.conversation_id,
+                    exc,
+                )
+
+                trulens_res = {
+                    "status": "failed",
+                    "error": str(
+                        exc
+                    ),
+                }
 
         # --------------------------------------------------------------------
         # DeepEval
         # --------------------------------------------------------------------
 
-        try:
+        if future_deepeval is not None:
 
-            deepeval_res = (
-                future_deepeval.result(
-                    timeout=_remaining_deadline(
-                        deadline
-                    )
+            try:
+
+                deepeval_timeout = _remaining_deadline(
+                    deadline
                 )
-            )
 
-        except Exception as exc:
+                if deepeval_timeout is None:
+                    deepeval_timeout = _DEFAULT_DEEPEVAL_TIMEOUT
 
-            logger.error(
-                "Groundedness DeepEval failed "
-                "for %s: %s",
-                eval_input.conversation_id,
-                exc,
-            )
+                deepeval_res = future_deepeval.result(
+                    timeout=deepeval_timeout
+                )
 
-            deepeval_res = {
-                "status": "failed",
-                "error": str(
-                    exc
-                ),
-            }
+            except Exception as exc:
+
+                logger.error(
+                    "Groundedness DeepEval failed "
+                    "for %s: %s",
+                    eval_input.conversation_id,
+                    exc,
+                )
+
+                deepeval_res = {
+                    "status": "failed",
+                    "error": str(
+                        exc
+                    ),
+                }
 
         # --------------------------------------------------------------------
         # Custom judge failure

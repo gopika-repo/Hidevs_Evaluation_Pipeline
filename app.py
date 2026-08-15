@@ -1,4 +1,9 @@
-from concurrent.futures import ThreadPoolExecutor, as_completed, Future, TimeoutError
+from concurrent.futures import (
+    ThreadPoolExecutor,
+    as_completed,
+    Future,
+    TimeoutError,
+)
 import logging
 import os
 import time
@@ -10,53 +15,73 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from evaluation_pipeline.aggregator.score_aggregator import ScoreAggregator
 from evaluation_pipeline.data.dataset_builder import DatasetBuilder
-from evaluation_pipeline.data.models import ConversationRecord, EvaluationResult
-from evaluation_pipeline.evaluators.groundedness_evaluator import GroundednessEvaluator
+from evaluation_pipeline.data.models import (
+    ConversationRecord,
+    EvaluationResult,
+)
+from evaluation_pipeline.evaluators.groundedness_evaluator import (
+    GroundednessEvaluator,
+)
 from evaluation_pipeline.evaluators.intent_evaluator import IntentEvaluator
 from evaluation_pipeline.evaluators.memory_evaluator import MemoryEvaluator
-from evaluation_pipeline.evaluators.response_quality_evaluator import ResponseQualityEvaluator
+from evaluation_pipeline.evaluators.response_quality_evaluator import (
+    ResponseQualityEvaluator,
+)
 from evaluation_pipeline.evaluators.safety_evaluator import SafetyEvaluator
 from evaluation_pipeline.utils.cors_config import get_allowed_origins
 from evaluation_pipeline.utils.error_handler import classify_exception
 
+
 load_dotenv()
 
-# ---------------------------------------------------------------------------
-# Logging
-# ---------------------------------------------------------------------------
 
-logging.basicConfig(level=logging.INFO)
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+)
+
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# FastAPI application
-# ---------------------------------------------------------------------------
+
+# ============================================================================
+# FASTAPI APPLICATION
+# ============================================================================
 
 app = FastAPI(
     title="Evaluation Pipeline API",
 )
 
-# ---------------------------------------------------------------------------
-# Persistent evaluator executor
-# ---------------------------------------------------------------------------
-#
-# IMPORTANT:
-# Do NOT create a ThreadPoolExecutor with "with ..." inside /evaluate.
-# The context manager performs shutdown(wait=True), which can block the
-# HTTP response while slow evaluator workers are still running.
-#
-# This executor remains alive for the process lifetime.
-# ---------------------------------------------------------------------------
+
+# ============================================================================
+# PERSISTENT EVALUATOR EXECUTOR
+# ============================================================================
+
+try:
+    _EVALUATION_EXECUTOR_WORKERS = max(
+        5,
+        int(
+            os.getenv(
+                "EVALUATION_EXECUTOR_WORKERS",
+                "10",
+            )
+        ),
+    )
+except (TypeError, ValueError):
+    _EVALUATION_EXECUTOR_WORKERS = 10
+
 
 _EVAL_EXECUTOR = ThreadPoolExecutor(
-    max_workers=int(
-        os.getenv("EVALUATION_EXECUTOR_WORKERS", "10")
-    )
+    max_workers=_EVALUATION_EXECUTOR_WORKERS,
+    thread_name_prefix="evaluation",
 )
 
-# ---------------------------------------------------------------------------
+
+# ============================================================================
 # CORS
-# ---------------------------------------------------------------------------
+# ============================================================================
 
 allowed_origins = get_allowed_origins()
 
@@ -68,12 +93,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ---------------------------------------------------------------------------
-# Request logging middleware
-# ---------------------------------------------------------------------------
+
+# ============================================================================
+# REQUEST LOGGING MIDDLEWARE
+# ============================================================================
 
 @app.middleware("http")
 async def log_requests(request, call_next):
+    start = time.time()
+
     logger.info(
         "--> Incoming request: %s %s",
         request.method,
@@ -83,28 +111,35 @@ async def log_requests(request, call_next):
     try:
         response = await call_next(request)
 
+        duration = time.time() - start
+
         logger.info(
-            "<-- Request finished: %s %s - Status: %s",
+            "<-- Request finished: %s %s - Status: %s - Duration: %.3fs",
             request.method,
             request.url,
             response.status_code,
+            duration,
         )
 
         return response
 
     except Exception as exc:
+        duration = time.time() - start
+
         logger.exception(
-            "<-- Request failed: %s %s - Error: %s",
+            "<-- Request failed: %s %s - Duration: %.3fs - Error: %s",
             request.method,
             request.url,
+            duration,
             exc,
         )
+
         raise
 
 
-# ---------------------------------------------------------------------------
-# Health endpoints
-# ---------------------------------------------------------------------------
+# ============================================================================
+# HEALTH ENDPOINTS
+# ============================================================================
 
 @app.get("/")
 def read_root():
@@ -124,18 +159,21 @@ def health_check():
     }
 
 
-# ---------------------------------------------------------------------------
-# Evaluation helpers
-# ---------------------------------------------------------------------------
+# ============================================================================
+# EVALUATION HELPERS
+# ============================================================================
 
-def _remaining_time(deadline: float) -> float:
+def _remaining_time(
+    deadline: float,
+) -> float:
     """
-    Return remaining request time.
+    Return the remaining request time.
 
-    Never return zero/negative time to Future.result().
-    A tiny floor prevents invalid timeout values while still allowing the
-    caller to recognize that the request deadline is effectively exhausted.
+    A small positive floor avoids passing zero/negative values to
+    Future.result(), while the caller still treats an effectively
+    exhausted deadline as expired.
     """
+
     return max(
         0.05,
         deadline - time.time(),
@@ -151,8 +189,9 @@ def _build_failed_result(
     applicable: bool = True,
 ) -> EvaluationResult:
     """
-    Build a consistent evaluator failure/timeout result.
+    Build a consistent evaluator failure result.
     """
+
     kwargs = {
         "evaluator_name": evaluator_name,
         "conversation_id": conversation_id,
@@ -167,82 +206,111 @@ def _build_failed_result(
     if not applicable:
         kwargs["applicable"] = False
 
-    return EvaluationResult(**kwargs)
+    return EvaluationResult(
+        **kwargs
+    )
 
 
 def _collect_evaluator_results(
     *,
-    futures: dict[Future, tuple[str, object]],
+    futures: dict[
+        Future,
+        tuple[str, object],
+    ],
     conversation_id: str,
     deadline: float,
 ) -> dict[str, EvaluationResult]:
     """
-    Collect ALL evaluator futures against ONE shared request deadline.
+    Collect evaluator futures against one shared request deadline.
 
-    The critical difference from the previous implementation:
+    All evaluators are started concurrently.
 
-        BAD:
-            wait RQ -> then wait GD -> then wait Safety -> ...
+    Once the HTTP request deadline expires:
+        - completed evaluators are returned normally;
+        - unfinished evaluators receive a timeout result;
+        - already-running evaluator threads are NOT forcibly cancelled.
 
-        GOOD:
-            submit everything immediately
-            wait for all completions concurrently
-            once the global deadline expires, mark only unfinished evaluators
-            as timed out
-
-    Therefore a fast evaluator cannot consume the entire remaining deadline
-    before groundedness gets a chance to return.
+    This prevents the API request lifecycle from interfering with background
+    evaluator cleanup.
     """
 
     results: dict[str, EvaluationResult] = {}
 
-    # Reverse lookup:
-    # Future -> evaluator name / evaluator instance
-    future_metadata = dict(futures)
-
-    if not future_metadata:
+    if not futures:
         return results
 
+    future_metadata = dict(
+        futures
+    )
+
     try:
-        remaining = _remaining_time(deadline)
+        remaining = _remaining_time(
+            deadline
+        )
+
+        if remaining <= 0.05:
+            raise TimeoutError()
 
         for future in as_completed(
             future_metadata,
             timeout=remaining,
         ):
-            evaluator_name, evaluator_instance = future_metadata[future]
+            evaluator_name, evaluator_instance = future_metadata[
+                future
+            ]
 
             try:
-                results[evaluator_name] = future.result()
+                result = future.result()
+
+                results[
+                    evaluator_name
+                ] = result
+
+                logger.info(
+                    "Evaluator completed: "
+                    "conversation_id=%s evaluator=%s",
+                    conversation_id,
+                    evaluator_name,
+                )
 
             except Exception as exc:
                 logger.exception(
-                    "%s failed for conversation_id=%s",
-                    evaluator_name,
+                    "Evaluator failed: "
+                    "conversation_id=%s evaluator=%s error=%s",
                     conversation_id,
+                    evaluator_name,
+                    exc,
                 )
 
-                results[evaluator_name] = _build_failed_result(
+                results[
+                    evaluator_name
+                ] = _build_failed_result(
                     evaluator_name=evaluator_instance.name,
                     conversation_id=conversation_id,
-                    status=classify_exception(exc),
+                    status=classify_exception(
+                        exc
+                    ),
                     error=(
                         f"{evaluator_name} evaluation failed: "
                         f"{exc}"
                     ),
                     applicable=(
-                        evaluator_name != "memory_and_continuity"
+                        evaluator_name
+                        != "memory_and_continuity"
                     ),
                 )
 
     except TimeoutError:
         logger.warning(
-            "Evaluation request deadline reached for conversation_id=%s",
+            "Evaluation request deadline reached: "
+            "conversation_id=%s",
             conversation_id,
         )
 
-    # Any future that did not finish before the request deadline is now
-    # represented explicitly as a timeout.
+    # ------------------------------------------------------------------------
+    # Handle anything that did not finish before the request deadline.
+    # ------------------------------------------------------------------------
+
     for future, (
         evaluator_name,
         evaluator_instance,
@@ -251,83 +319,129 @@ def _collect_evaluator_results(
         if evaluator_name in results:
             continue
 
+        # A future may have completed right after as_completed() timed out.
         if future.done():
+
             try:
-                results[evaluator_name] = future.result()
+                result = future.result()
+
+                results[
+                    evaluator_name
+                ] = result
+
+                logger.info(
+                    "Evaluator completed after collection timeout: "
+                    "conversation_id=%s evaluator=%s",
+                    conversation_id,
+                    evaluator_name,
+                )
+
                 continue
 
             except Exception as exc:
                 logger.exception(
-                    "%s completed with an exception for conversation_id=%s",
-                    evaluator_name,
+                    "Evaluator completed with exception: "
+                    "conversation_id=%s evaluator=%s error=%s",
                     conversation_id,
+                    evaluator_name,
+                    exc,
                 )
 
-                results[evaluator_name] = _build_failed_result(
+                results[
+                    evaluator_name
+                ] = _build_failed_result(
                     evaluator_name=evaluator_instance.name,
                     conversation_id=conversation_id,
-                    status=classify_exception(exc),
+                    status=classify_exception(
+                        exc
+                    ),
                     error=(
                         f"{evaluator_name} evaluation failed: "
                         f"{exc}"
                     ),
                     applicable=(
-                        evaluator_name != "memory_and_continuity"
+                        evaluator_name
+                        != "memory_and_continuity"
                     ),
                 )
 
                 continue
 
-        # Future is still running / pending.
-        logger.error(
-            "Evaluator timed out: evaluator=%s conversation_id=%s",
-            evaluator_name,
+        # --------------------------------------------------------------------
+        # Evaluator is still running.
+        #
+        # DO NOT cancel it here.
+        #
+        # The evaluator may already have an active Gemini/TruLens/DeepEval
+        # request. Let that work finish independently.
+        # --------------------------------------------------------------------
+
+        logger.warning(
+            "Evaluator timed out for current HTTP request: "
+            "conversation_id=%s evaluator=%s",
             conversation_id,
+            evaluator_name,
         )
 
-        results[evaluator_name] = _build_failed_result(
+        results[
+            evaluator_name
+        ] = _build_failed_result(
             evaluator_name=evaluator_instance.name,
             conversation_id=conversation_id,
             status="timeout",
             error=(
-                f"{evaluator_name} evaluation timed out "
-                f"before the request deadline."
+                f"{evaluator_name} evaluation exceeded the "
+                f"request deadline."
             ),
             applicable=(
-                evaluator_name != "memory_and_continuity"
+                evaluator_name
+                != "memory_and_continuity"
             ),
         )
 
     return results
 
 
-# ---------------------------------------------------------------------------
-# Main evaluation endpoint
-# ---------------------------------------------------------------------------
+# ============================================================================
+# MAIN EVALUATION ENDPOINT
+# ============================================================================
 
 @app.post("/evaluate")
-def run_evaluation(record: ConversationRecord):
+def run_evaluation(
+    record: ConversationRecord,
+):
     """
     Evaluate one conversation record and return the complete evaluation report.
     """
 
-    # -----------------------------------------------------------------------
-    # 1. Build EvaluationInput
-    # -----------------------------------------------------------------------
+    request_start = time.time()
+
+    # =========================================================================
+    # 1. BUILD EVALUATION INPUT
+    # =========================================================================
 
     builder = DatasetBuilder()
 
     try:
-        inputs = builder.build([record])
+        inputs = builder.build(
+            [record]
+        )
+
     except Exception as exc:
         logger.exception(
             "Failed to build evaluation input for conversation_id=%s",
-            getattr(record, "conversation_id", "unknown"),
+            getattr(
+                record,
+                "conversation_id",
+                "unknown",
+            ),
         )
 
         raise HTTPException(
             status_code=400,
-            detail=f"Failed to parse input record: {exc}",
+            detail=(
+                f"Failed to parse input record: {exc}"
+            ),
         ) from exc
 
     if not inputs:
@@ -338,44 +452,77 @@ def run_evaluation(record: ConversationRecord):
 
     evaluation_input = inputs[0]
 
-    # -----------------------------------------------------------------------
-    # 2. Establish ONE request deadline
-    # -----------------------------------------------------------------------
+    conversation_id = evaluation_input.conversation_id
+
+    # =========================================================================
+    # 2. REQUEST TIMEOUT
+    # =========================================================================
+    #
+    # Groundedness is the most expensive evaluator because it can involve:
+    #
+    #     custom Gemini judge
+    #     TruLens
+    #     DeepEval
+    #
+    # Therefore the old 45-second default is too aggressive for a cold
+    # production request.
+    #
+    # It remains configurable through:
+    #
+    #     EVALUATION_REQUEST_TIMEOUT
+    #
+    # =========================================================================
 
     try:
         request_timeout = float(
             os.getenv(
                 "EVALUATION_REQUEST_TIMEOUT",
-                "45.0",
+                "90.0",
             )
         )
-    except ValueError as exc:
+
+    except (
+        TypeError,
+        ValueError,
+    ) as exc:
+
         raise HTTPException(
             status_code=500,
-            detail="Invalid EVALUATION_REQUEST_TIMEOUT configuration.",
+            detail=(
+                "Invalid EVALUATION_REQUEST_TIMEOUT "
+                "configuration."
+            ),
         ) from exc
 
     if request_timeout <= 0:
+
         raise HTTPException(
             status_code=500,
-            detail="EVALUATION_REQUEST_TIMEOUT must be greater than zero.",
+            detail=(
+                "EVALUATION_REQUEST_TIMEOUT must be "
+                "greater than zero."
+            ),
         )
 
-    deadline = time.time() + request_timeout
+    deadline = (
+        time.time()
+        + request_timeout
+    )
 
     evaluation_input.deadline = deadline
 
-    conversation_id = evaluation_input.conversation_id
-
     logger.info(
-        "Starting evaluation request: conversation_id=%s timeout=%.2fs",
+        "Starting evaluation: "
+        "conversation_id=%s request_timeout=%.2fs",
         conversation_id,
         request_timeout,
     )
 
-    # -----------------------------------------------------------------------
-    # 3. Create evaluator instances
-    # -----------------------------------------------------------------------
+    # =========================================================================
+    # 3. CREATE EVALUATORS
+    # =========================================================================
+
+    construction_start = time.time()
 
     rq_evaluator = ResponseQualityEvaluator()
     gd_evaluator = GroundednessEvaluator()
@@ -383,22 +530,18 @@ def run_evaluation(record: ConversationRecord):
     it_evaluator = IntentEvaluator()
     me_evaluator = MemoryEvaluator()
 
-    # -----------------------------------------------------------------------
-    # 4. Submit ALL evaluators immediately
-    # -----------------------------------------------------------------------
-    #
-    # This is the critical reliability fix.
-    #
-    # All five evaluators start at approximately the same time.
-    # We do NOT:
-    #
-    #   result RQ
-    #   then result GD
-    #   then result Safety
-    #
-    # because that allows one slow evaluator to consume the request budget
-    # before the other evaluators get their result.
-    # -----------------------------------------------------------------------
+    logger.info(
+        "Evaluator initialization completed: "
+        "conversation_id=%s duration=%.3fs",
+        conversation_id,
+        time.time() - construction_start,
+    )
+
+    # =========================================================================
+    # 4. SUBMIT ALL EVALUATORS IMMEDIATELY
+    # =========================================================================
+
+    submission_start = time.time()
 
     future_rq = _EVAL_EXECUTOR.submit(
         rq_evaluator.evaluate,
@@ -448,9 +591,16 @@ def run_evaluation(record: ConversationRecord):
         ),
     }
 
-    # -----------------------------------------------------------------------
-    # 5. Collect results concurrently against the shared deadline
-    # -----------------------------------------------------------------------
+    logger.info(
+        "All evaluators submitted: "
+        "conversation_id=%s duration=%.3fs",
+        conversation_id,
+        time.time() - submission_start,
+    )
+
+    # =========================================================================
+    # 5. COLLECT RESULTS
+    # =========================================================================
 
     try:
         results = _collect_evaluator_results(
@@ -458,31 +608,40 @@ def run_evaluation(record: ConversationRecord):
             conversation_id=conversation_id,
             deadline=deadline,
         )
+
     except Exception as exc:
         logger.exception(
-            "Unexpected evaluator collection failure for conversation_id=%s",
+            "Unexpected evaluator collection failure: "
+            "conversation_id=%s error=%s",
             conversation_id,
+            exc,
         )
 
         raise HTTPException(
             status_code=500,
-            detail=f"Evaluation collection failed: {exc}",
+            detail=(
+                f"Evaluation collection failed: {exc}"
+            ),
         ) from exc
 
-    # -----------------------------------------------------------------------
-    # 6. Extract evaluator results
-    # -----------------------------------------------------------------------
+    # =========================================================================
+    # 6. GUARANTEE RESULT OBJECTS EXIST
+    # =========================================================================
 
     rq_res = results.get(
         "response_quality"
     )
 
     if rq_res is None:
+
         rq_res = _build_failed_result(
             evaluator_name=rq_evaluator.name,
             conversation_id=conversation_id,
             status="timeout",
-            error="Response Quality result was not produced.",
+            error=(
+                "Response Quality result "
+                "was not produced."
+            ),
         )
 
     gd_res = results.get(
@@ -490,11 +649,15 @@ def run_evaluation(record: ConversationRecord):
     )
 
     if gd_res is None:
+
         gd_res = _build_failed_result(
             evaluator_name=gd_evaluator.name,
             conversation_id=conversation_id,
             status="timeout",
-            error="Groundedness result was not produced.",
+            error=(
+                "Groundedness result "
+                "was not produced."
+            ),
         )
 
     sf_res = results.get(
@@ -502,11 +665,15 @@ def run_evaluation(record: ConversationRecord):
     )
 
     if sf_res is None:
+
         sf_res = _build_failed_result(
             evaluator_name=sf_evaluator.name,
             conversation_id=conversation_id,
             status="timeout",
-            error="Safety result was not produced.",
+            error=(
+                "Safety result "
+                "was not produced."
+            ),
         )
 
     it_res = results.get(
@@ -514,11 +681,15 @@ def run_evaluation(record: ConversationRecord):
     )
 
     if it_res is None:
+
         it_res = _build_failed_result(
             evaluator_name=it_evaluator.name,
             conversation_id=conversation_id,
             status="timeout",
-            error="Intent result was not produced.",
+            error=(
+                "Intent result "
+                "was not produced."
+            ),
         )
 
     me_res = results.get(
@@ -526,54 +697,96 @@ def run_evaluation(record: ConversationRecord):
     )
 
     if me_res is None:
+
         me_res = _build_failed_result(
             evaluator_name=me_evaluator.name,
             conversation_id=conversation_id,
             status="timeout",
-            error="Memory result was not produced.",
+            error=(
+                "Memory result "
+                "was not produced."
+            ),
             applicable=False,
         )
 
-    # -----------------------------------------------------------------------
-    # 7. Aggregate final report
-    # -----------------------------------------------------------------------
+    # =========================================================================
+    # 7. AGGREGATE FINAL REPORT
+    # =========================================================================
 
     try:
+
+        aggregation_start = time.time()
+
         aggregator = ScoreAggregator()
 
         report = aggregator.aggregate_dataset(
-            inputs=[evaluation_input],
-            rq_results=[rq_res],
-            gd_results=[gd_res],
-            safety_results=[sf_res],
-            intent_results=[it_res],
-            memory_results=[me_res],
+            inputs=[
+                evaluation_input
+            ],
+            rq_results=[
+                rq_res
+            ],
+            gd_results=[
+                gd_res
+            ],
+            safety_results=[
+                sf_res
+            ],
+            intent_results=[
+                it_res
+            ],
+            memory_results=[
+                me_res
+            ],
+        )
+
+        logger.info(
+            "Score aggregation completed: "
+            "conversation_id=%s duration=%.3fs",
+            conversation_id,
+            time.time() - aggregation_start,
         )
 
     except Exception as exc:
         logger.exception(
-            "Score aggregation failed for conversation_id=%s",
+            "Score aggregation failed: "
+            "conversation_id=%s error=%s",
             conversation_id,
+            exc,
         )
 
         raise HTTPException(
             status_code=500,
-            detail=f"Evaluation aggregation failed: {exc}",
+            detail=(
+                f"Evaluation aggregation failed: {exc}"
+            ),
         ) from exc
 
+    # =========================================================================
+    # 8. FINAL LOGGING
+    # =========================================================================
+
+    total_duration = (
+        time.time()
+        - request_start
+    )
+
     logger.info(
-        "Evaluation request completed: conversation_id=%s",
+        "Evaluation request completed: "
+        "conversation_id=%s total_duration=%.3fs",
         conversation_id,
+        total_duration,
     )
 
     return report
 
 
-# ---------------------------------------------------------------------------
-# Application entry point
-# ---------------------------------------------------------------------------
+# ============================================================================
+# APPLICATION ENTRY POINT
+# ============================================================================
 
 if __name__ == "__main__":
+
     uvicorn.run(
         "app:app",
         host="0.0.0.0",
