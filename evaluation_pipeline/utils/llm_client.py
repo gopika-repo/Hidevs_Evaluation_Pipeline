@@ -16,6 +16,7 @@ import re
 import time
 from datetime import datetime, timezone
 from typing import Any
+from pydantic import BaseModel
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -24,12 +25,12 @@ logger = logging.getLogger(__name__)
 
 # Environment Validation
 _api_key_configured = "yes" if os.getenv("GOOGLE_API_KEY") else "no"
-_gemini_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash")
+_gemini_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite")
 print(f"Gemini API key configured: {_api_key_configured}", flush=True)
 print(f"Gemini model: {_gemini_model}", flush=True)
 
 # Defaults
-_DEFAULT_MODEL = "gemini-3.5-flash"
+_DEFAULT_MODEL = "gemini-3.5-flash-lite"
 _DEFAULT_TEMPERATURE = 0.0
 _DEFAULT_MAX_TOKENS = 4096
 _MAX_RETRIES = 3
@@ -41,7 +42,7 @@ class LLMJudge:
     LLM-as-a-judge client backed by Google Gemini via LangChain.
 
     Initializes from environment variables:
-      - GEMINI_MODEL_NAME  (default: gemini-3.5-flash)
+      - GEMINI_MODEL_NAME  (default: gemini-3.5-flash-lite)
       - GOOGLE_API_KEY     (required)
 
     Usage

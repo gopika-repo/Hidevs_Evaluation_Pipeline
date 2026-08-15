@@ -1,22 +1,68 @@
 """
 Groundedness / Hallucination Evaluator — Phase 1
 
-Context-Backed:
-  Custom LLM judge:
-    - Internal Consistency  -> 6 points
-    - Overconfidence        -> 6 points
-    - Hallucination Risk    -> 8 points
-    Total                    -> 20 points
+Context-Backed
+--------------
+Official score:
+    Internal Consistency -> 6
+    Overconfidence       -> 6
+    Hallucination Risk   -> 8
 
-  TruLens and DeepEval are comparison metrics only.
-  They do NOT contribute to the official groundedness score.
+Comparison metrics:
+    TruLens Groundedness
+    DeepEval Faithfulness
 
-Context-Free:
-  Custom LLM judge:
-    - Internal Consistency  -> 6 points
-    - Overconfidence        -> 6 points
-    - Hallucination Risk    -> 8 points
-    Total                    -> 20 points
+TruLens and DeepEval do NOT contribute to the official score.
+
+Context-Free
+------------
+Official score:
+    Internal Consistency -> 6
+    Overconfidence       -> 6
+    Hallucination Risk   -> 8
+
+TruLens and DeepEval are not applicable.
+
+TruLens / Google GenAI compatibility
+-------------------------------------
+The installed environment uses:
+
+    trulens-core              2.12.0
+    trulens-feedback          2.12.0
+    trulens-providers-google  2.12.0
+    google-genai              2.18.1
+
+The installed TruLens Google provider passes a Pydantic response model
+through Google's typed `response_schema` path.
+
+That path has produced errors such as:
+
+    Unknown name "additional_properties"
+
+and:
+
+    response_schema.required[0]: property is not defined
+
+The compatibility provider below keeps TruLens' groundedness logic but
+overrides only the Gemini completion call.
+
+When TruLens requests structured output:
+
+    1. Obtain the real Pydantic JSON schema.
+    2. Resolve local $ref / $defs references.
+    3. Validate that required fields actually exist in properties.
+    4. Send the resulting schema through Gemini's raw JSON-schema field:
+           response_json_schema
+       rather than:
+           response_schema
+
+This avoids the incompatible typed-schema conversion layer.
+
+No mock data is used.
+No API key is hardcoded.
+No evaluation score is hardcoded.
+The Gemini model is read from GEMINI_MODEL_NAME.
+The API key is read from GOOGLE_API_KEY.
 """
 
 from __future__ import annotations
@@ -25,7 +71,7 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Optional, Sequence
 
 from evaluation_pipeline.data.models import (
     ConversationType,
@@ -40,88 +86,81 @@ from evaluation_pipeline.utils.schemas import GroundednessSchema
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Executors
-# ---------------------------------------------------------------------------
+# ============================================================================
+# EXECUTOR
+# ============================================================================
 
-# IMPORTANT:
-# Existing groundedness tests patch:
-#
-#   evaluation_pipeline.evaluators.groundedness_evaluator._shared_executor.submit
-#
-# Therefore TruLens and DeepEval MUST use _shared_executor.
-#
-# This executor is reserved for actual framework calls.
+try:
+    _SHARED_EXECUTOR_WORKERS = max(
+        8,
+        int(
+            os.getenv(
+                "GROUNDEDNESS_EXECUTOR_WORKERS",
+                "64",
+            )
+        ),
+    )
+except (TypeError, ValueError):
+    _SHARED_EXECUTOR_WORKERS = 64
+
+
 _shared_executor = ThreadPoolExecutor(
-    max_workers=4,
-    thread_name_prefix="groundedness-framework",
+    max_workers=_SHARED_EXECUTOR_WORKERS,
+    thread_name_prefix="groundedness",
 )
 
 
-# Separate executor for orchestration of:
-#   - custom judge
-#   - TruLens wrapper
-#   - DeepEval wrapper
-#
-# This prevents the outer orchestration layer from consuming the same
-# worker threads needed by the framework futures.
-_orchestration_executor = ThreadPoolExecutor(
-    max_workers=8,
-    thread_name_prefix="groundedness-orchestration",
-)
-
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# ============================================================================
+# CONSTANTS
+# ============================================================================
 
 _MAX_SCORE_CONTEXT_BACKED = 20.0
 _MAX_SCORE_CONTEXT_FREE = 20.0
 
 _MIN_FRAMEWORK_TIMEOUT = 0.05
 
+_DEFAULT_TRULENS_TIMEOUT = 45.0
+_DEFAULT_DEEPEVAL_TIMEOUT = 45.0
 
-# ---------------------------------------------------------------------------
-# Prompts — Context-Backed
-# ---------------------------------------------------------------------------
+_FRAMEWORK_MAX_RETRIES = 3
+_FRAMEWORK_RETRY_DELAY = 2.0
+
+
+# ============================================================================
+# PROMPTS — CONTEXT BACKED
+# ============================================================================
 
 _SYSTEM_PROMPT_CONTEXT_BACKED = """\
-You are a STRICT, expert evaluation judge specialising in groundedness
-and hallucination detection.
+You are a STRICT expert judge specializing in groundedness and hallucination
+detection.
 
-You must be rigorous. Penalise unsupported, fabricated, or contradicted
-claims.
+Evaluate the AI assistant response against the retrieved source context.
 
-Evaluate the AI assistant response on three dimensions.
+You must score exactly three dimensions from 1 to 5.
 
-1. Internal Consistency (1-5)
-
-Does the response contradict itself?
-
-Are all statements logically compatible with:
-- the user query,
-- the conversation history,
-- and the response itself?
+1. INTERNAL CONSISTENCY
+Does the response contradict itself or the supplied conversation context?
 
 5 = Fully consistent
-1 = Contains clear contradictions
+4 = Minor issue
+3 = Some inconsistency
+2 = Significant inconsistency
+1 = Clear contradiction
 
-2. Overconfidence (1-5)
-
-Does the response present uncertain or unverifiable information as confirmed
+2. OVERCONFIDENCE
+Does the response present uncertain or unverifiable information as established
 fact?
 
-Does it appropriately hedge claims that cannot be verified from the provided
-context?
+5 = Fully calibrated
+4 = Mostly calibrated
+3 = Some unnecessary certainty
+2 = Frequently overconfident
+1 = Strongly presents unsupported claims as facts
 
-5 = Appropriately calibrated
-1 = Presents speculation as fact
+3. HALLUCINATION RISK
+Are the response's claims actually supported by the retrieved source context?
 
-3. Hallucination Risk (1-5)
-
-Are the claims supported by the retrieved source context?
-
-Penalise:
+Penalize:
 - fabricated facts
 - unsupported names
 - unsupported numbers
@@ -129,143 +168,141 @@ Penalise:
 - unsupported URLs
 - unsupported locations
 - unsupported statistics
-- claims contradicting the retrieved context
+- direct contradictions of the retrieved context
 
 5 = Fully grounded
+4 = Mostly grounded
+3 = Some unsupported details
+2 = Significant unsupported content
 1 = Clearly fabricated or contradicted
 
-Return ONLY valid JSON with exactly this structure:
+Return ONLY JSON matching this exact structure:
 
 {
   "internal_consistency": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
   "overconfidence": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
   "hallucination_risk": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
-  "overall_reasoning": "<summary>"
+  "overall_reasoning": "summary"
 }
+
+Do not include markdown.
+Do not include additional fields.
 """
 
 
 _USER_PROMPT_CONTEXT_BACKED = """\
-Evaluate the groundedness of the following AI assistant response against
-the provided source context.
+Evaluate the AI assistant response against the retrieved source context.
 
-## User Query
+## USER QUERY
 {user_query}
 
-## AI Assistant Response
+## AI ASSISTANT RESPONSE
 {dave_response}
 
-## Retrieved Source Context
+## RETRIEVED SOURCE CONTEXT
 {retrieved_context}
 
 {chat_history_section}
 
-Score each dimension from 1–5.
-
-5 = good / no issue
-1 = severe issue
+Score all three dimensions from 1 to 5.
 
 Return ONLY valid JSON.
 """
 
 
-# ---------------------------------------------------------------------------
-# Prompts — Context-Free
-# ---------------------------------------------------------------------------
+# ============================================================================
+# PROMPTS — CONTEXT FREE
+# ============================================================================
 
 _SYSTEM_PROMPT_CONTEXT_FREE = """\
-You are a STRICT, expert evaluation judge specialising in hallucination
-and overconfidence detection when no retrieved source context is available.
+You are a STRICT expert judge specializing in hallucination and
+overconfidence detection.
 
-Evaluate the response on three dimensions.
+No retrieved source context is available.
 
-1. Internal Consistency (1-5)
+Evaluate exactly three dimensions from 1 to 5.
 
-Does the response contradict itself or previous conversation information?
+1. INTERNAL CONSISTENCY
+Does the response contradict itself or information explicitly present in
+conversation history?
 
 5 = Fully consistent
-1 = Clear contradictions
+1 = Clear contradiction
 
-2. Overconfidence (1-5)
-
+2. OVERCONFIDENCE
 Does the response present uncertain or unverifiable information as fact?
 
-5 = Appropriately calibrated
-1 = Presents speculation as fact
+5 = Fully calibrated
+1 = Strongly overconfident
 
-3. Hallucination Risk (1-5)
-
-Does the response contain fabricated, invented, or unsupported specifics?
+3. HALLUCINATION RISK
+Does the response contain fabricated or suspiciously invented specifics?
 
 Look for:
 - invented statistics
-- fake references
-- made-up URLs
-- fabricated dates
 - fabricated names
-- unsupported claims
+- fabricated dates
+- fake URLs
+- made-up references
+- unsupported precise claims
 
 5 = No hallucination indicators
 1 = Clearly fabricated content
 
-Return ONLY valid JSON with exactly this structure:
+Return ONLY JSON matching this exact structure:
 
 {
   "internal_consistency": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
   "overconfidence": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
   "hallucination_risk": {
-    "score": <1-5>,
-    "reasoning": "<specific assessment>"
+    "score": 1,
+    "reasoning": "specific assessment"
   },
-  "overall_reasoning": "<summary>"
+  "overall_reasoning": "summary"
 }
+
+Do not include markdown.
+Do not include additional fields.
 """
 
 
 _USER_PROMPT_CONTEXT_FREE = """\
-Evaluate the following AI assistant response for:
+Evaluate the following AI assistant response.
 
-- internal consistency
-- overconfidence
-- hallucination risk
+No retrieved source context is available.
 
-No source context is available.
-
-## User Query
+## USER QUERY
 {user_query}
 
-## AI Assistant Response
+## AI ASSISTANT RESPONSE
 {dave_response}
 
 {chat_history_section}
 
-Score each dimension from 1–5.
-
-5 = good / no issue
-1 = severe issue
+Score all three dimensions from 1 to 5.
 
 Return ONLY valid JSON.
 """
 
 
-# ---------------------------------------------------------------------------
-# Timeout helper
-# ---------------------------------------------------------------------------
+# ============================================================================
+# TIMEOUT HELPERS
+# ============================================================================
 
 def _calculate_framework_timeout(
     env_name: str,
@@ -273,35 +310,29 @@ def _calculate_framework_timeout(
     deadline: float | None,
 ) -> float:
     """
-    Calculate a bounded timeout for TruLens / DeepEval.
-
-    A very small remaining deadline is floored to 0.05 seconds because
-    the test suite explicitly verifies this behaviour.
+    Return a bounded timeout for an external framework.
     """
+
     try:
-        timeout = float(
+        configured = float(
             os.getenv(
                 env_name,
                 str(default),
             )
         )
-    except (TypeError, ValueError) as exc:
-        raise ValueError(
-            f"Invalid {env_name} value."
-        ) from exc
+    except (TypeError, ValueError):
+        configured = default
 
-    if timeout <= 0:
-        raise ValueError(
-            f"{env_name} must be greater than 0."
-        )
+    if configured <= 0:
+        configured = default
 
     if deadline is None:
-        return timeout
+        return configured
 
     remaining = deadline - time.time()
 
     return min(
-        timeout,
+        configured,
         max(
             _MIN_FRAMEWORK_TIMEOUT,
             remaining,
@@ -309,9 +340,556 @@ def _calculate_framework_timeout(
     )
 
 
-# ---------------------------------------------------------------------------
-# TruLens integration
-# ---------------------------------------------------------------------------
+def _remaining_deadline(
+    deadline: float | None,
+) -> float | None:
+    """
+    Return remaining evaluation time.
+
+    None means there is no request deadline.
+    """
+
+    if deadline is None:
+        return None
+
+    return max(
+        _MIN_FRAMEWORK_TIMEOUT,
+        deadline - time.time(),
+    )
+
+
+# ============================================================================
+# TRULENS / GEMINI JSON-SCHEMA COMPATIBILITY
+# ============================================================================
+
+def _resolve_json_schema(
+    schema: Any,
+) -> Any:
+    """
+    Resolve Pydantic JSON-schema $ref/$defs structures into a standalone
+    schema suitable for direct Gemini JSON-schema submission.
+
+    This function uses the actual schema supplied by TruLens/Pydantic.
+
+    It does not invent fields, values, evaluation scores, or test data.
+    """
+
+    if not isinstance(schema, dict):
+        return schema
+
+    definitions = schema.get(
+        "$defs",
+        {},
+    )
+
+    if not isinstance(
+        definitions,
+        dict,
+    ):
+        definitions = {}
+
+    resolving: set[str] = set()
+
+    def resolve(
+        value: Any,
+    ) -> Any:
+
+        if isinstance(
+            value,
+            list,
+        ):
+            return [
+                resolve(item)
+                for item in value
+            ]
+
+        if not isinstance(
+            value,
+            dict,
+        ):
+            return value
+
+        # ------------------------------------------------------------
+        # Resolve local references.
+        # ------------------------------------------------------------
+
+        ref = value.get(
+            "$ref"
+        )
+
+        if (
+            isinstance(ref, str)
+            and ref.startswith("#/$defs/")
+        ):
+            ref_name = ref[
+                len("#/$defs/"):
+            ]
+
+            if ref_name in resolving:
+                # Prevent recursive-reference loops.
+                return {}
+
+            referenced_schema = definitions.get(
+                ref_name
+            )
+
+            if isinstance(
+                referenced_schema,
+                dict,
+            ):
+
+                resolving.add(
+                    ref_name
+                )
+
+                resolved_target = resolve(
+                    referenced_schema
+                )
+
+                resolving.remove(
+                    ref_name
+                )
+
+                # Merge local metadata from the ref node.
+                if isinstance(
+                    resolved_target,
+                    dict,
+                ):
+
+                    merged = dict(
+                        resolved_target
+                    )
+
+                    for key, item in value.items():
+                        if key != "$ref":
+                            merged[key] = item
+
+                    return resolve(
+                        merged
+                    )
+
+                return resolved_target
+
+        # ------------------------------------------------------------
+        # Normal recursive processing.
+        # ------------------------------------------------------------
+
+        result: dict[str, Any] = {}
+
+        for key, item in value.items():
+
+            # $defs is no longer required after inlining references.
+            if key in {
+                "$defs",
+                "$schema",
+                "$id",
+            }:
+                continue
+
+            result[
+                key
+            ] = resolve(
+                item
+            )
+
+        # ------------------------------------------------------------
+        # Normalize object schemas.
+        # ------------------------------------------------------------
+
+        schema_type = result.get(
+            "type"
+        )
+
+        if isinstance(
+            schema_type,
+            str,
+        ):
+            normalized_type = schema_type.lower()
+        else:
+            normalized_type = schema_type
+
+        if normalized_type == "object":
+
+            properties = result.get(
+                "properties"
+            )
+
+            if not isinstance(
+                properties,
+                dict,
+            ):
+                properties = {}
+
+            cleaned_properties: dict[str, Any] = {}
+
+            for property_name, property_schema in properties.items():
+                cleaned_properties[
+                    str(property_name)
+                ] = resolve(
+                    property_schema
+                )
+
+            result[
+                "properties"
+            ] = cleaned_properties
+
+            # --------------------------------------------------------
+            # Gemini requires every name in required to be present in
+            # properties.
+            # --------------------------------------------------------
+
+            required = result.get(
+                "required"
+            )
+
+            if isinstance(
+                required,
+                list,
+            ):
+
+                valid_required = [
+                    str(name)
+                    for name in required
+                    if str(name)
+                    in cleaned_properties
+                ]
+
+                if valid_required:
+                    result[
+                        "required"
+                    ] = valid_required
+                else:
+                    result.pop(
+                        "required",
+                        None,
+                    )
+
+            # Preserve or derive property ordering from actual
+            # properties. This is supported by Gemini.
+            if cleaned_properties:
+                result[
+                    "propertyOrdering"
+                ] = list(
+                    cleaned_properties.keys()
+                )
+
+        return result
+
+    resolved_schema = resolve(
+        schema
+    )
+
+    if not isinstance(
+        resolved_schema,
+        dict,
+    ):
+        raise ValueError(
+            "Resolved TruLens JSON schema is not an object."
+        )
+
+    return resolved_schema
+
+
+def _schema_from_response_format(
+    response_format: Any,
+) -> dict[str, Any] | None:
+    """
+    Extract the real JSON schema from the response model passed by TruLens.
+
+    Supports Pydantic v2 model_json_schema() and compatible schema() APIs.
+    """
+
+    if response_format is None:
+        return None
+
+    # Pydantic v2.
+    model_json_schema = getattr(
+        response_format,
+        "model_json_schema",
+        None,
+    )
+
+    if callable(
+        model_json_schema
+    ):
+
+        schema = model_json_schema()
+
+        if isinstance(
+            schema,
+            dict,
+        ):
+            return _resolve_json_schema(
+                schema
+            )
+
+    # Compatibility fallback.
+    schema_method = getattr(
+        response_format,
+        "schema",
+        None,
+    )
+
+    if callable(
+        schema_method
+    ):
+
+        schema = schema_method()
+
+        if isinstance(
+            schema,
+            dict,
+        ):
+            return _resolve_json_schema(
+                schema
+            )
+
+    raise ValueError(
+        "TruLens supplied a response format that does not expose "
+        "a usable JSON schema."
+    )
+
+
+# ============================================================================
+# COMPATIBLE TRULENS GOOGLE PROVIDER
+# ============================================================================
+
+class _CompatibleTruLensGoogleMixin:
+    """
+    Override only TruLens' Gemini completion implementation.
+
+    TruLens continues to own:
+
+        - groundedness sentence splitting
+        - trivial statement filtering
+        - groundedness prompting
+        - score normalization
+        - reason construction
+
+    Only the low-level Google GenAI structured-output request is replaced.
+    """
+
+    def _create_chat_completion(
+        self,
+        prompt: Optional[str] = None,
+        messages: Optional[
+            Sequence[dict[str, Any]]
+        ] = None,
+        response_format: Optional[Any] = None,
+        **kwargs: Any,
+    ) -> Optional[str]:
+
+        endpoint = getattr(
+            self,
+            "endpoint",
+            None,
+        )
+
+        if endpoint is None:
+            raise RuntimeError(
+                "TruLens Google endpoint is not initialized."
+            )
+
+        client = getattr(
+            endpoint,
+            "client",
+            None,
+        )
+
+        if client is None:
+            raise RuntimeError(
+                "TruLens Google endpoint does not expose "
+                "a configured GenAI client."
+            )
+
+        # ------------------------------------------------------------
+        # Build the Gemini request content from TruLens messages.
+        # ------------------------------------------------------------
+
+        contents: list[str] = []
+        system_instruction = ""
+
+        if messages is not None:
+
+            for message in messages:
+
+                if not isinstance(
+                    message,
+                    dict,
+                ):
+                    continue
+
+                role = str(
+                    message.get(
+                        "role",
+                        "",
+                    )
+                )
+
+                content = message.get(
+                    "content",
+                    "",
+                )
+
+                if role == "system":
+
+                    system_instruction = str(
+                        content
+                    )
+
+                elif role in {
+                    "user",
+                    "assistant",
+                    "model",
+                }:
+
+                    contents.append(
+                        str(content)
+                    )
+
+        elif prompt is not None:
+
+            contents.append(
+                str(prompt)
+            )
+
+        if not contents:
+            contents = [""]
+
+        # ------------------------------------------------------------
+        # Gemini GenerateContentConfig.
+        # ------------------------------------------------------------
+
+        from google.genai import types
+
+        config_kwargs: dict[str, Any] = {}
+
+        temperature = kwargs.get(
+            "temperature"
+        )
+
+        if temperature is not None:
+            config_kwargs[
+                "temperature"
+            ] = float(
+                temperature
+            )
+
+        if system_instruction:
+            config_kwargs[
+                "system_instruction"
+            ] = system_instruction
+
+        raw_schema = (
+            _schema_from_response_format(
+                response_format
+            )
+            if response_format is not None
+            else None
+        )
+
+        if raw_schema is not None:
+
+            # ========================================================
+            # CRITICAL FIX
+            #
+            # Do NOT use:
+            #
+            #     response_schema=raw_schema
+            #
+            # because google-genai treats that as its typed Schema
+            # conversion path.
+            #
+            # Send the actual raw JSON schema using:
+            #
+            #     response_json_schema
+            #
+            # This bypasses the Pydantic/Schema translation layer.
+            # ========================================================
+
+            config_kwargs[
+                "response_mime_type"
+            ] = "application/json"
+
+            config_kwargs[
+                "response_json_schema"
+            ] = raw_schema
+
+        config = types.GenerateContentConfig(
+            **config_kwargs
+        )
+
+        model_name = getattr(
+            self,
+            "model_engine",
+            None,
+        )
+
+        if not model_name:
+            raise RuntimeError(
+                "TruLens model_engine is not configured."
+            )
+
+        response = client.models.generate_content(
+            model=model_name,
+            contents=contents,
+            config=config,
+        )
+
+        text = getattr(
+            response,
+            "text",
+            None,
+        )
+
+        if text is None:
+            raise RuntimeError(
+                "Gemini returned no response text."
+            )
+
+        return str(
+            text
+        )
+
+
+def _create_compatible_trulens_provider(
+    client: Any,
+    model_engine: str,
+) -> Any:
+    """
+    Create a real TruLens Google provider subclass with only its Gemini
+    completion method overridden.
+
+    The installed TruLens Google provider remains the parent implementation.
+    """
+
+    from trulens.providers.google import Google
+
+    class CompatibleTruLensGoogle(
+        _CompatibleTruLensGoogleMixin,
+        Google,
+    ):
+        pass
+
+    provider = CompatibleTruLensGoogle(
+        client=client,
+        model_engine=model_engine,
+    )
+
+    if not isinstance(
+        provider,
+        Google,
+    ):
+        raise RuntimeError(
+            "Compatible TruLens provider is not a TruLens Google provider."
+        )
+
+    return provider
+
+
+# ============================================================================
+# TRULENS
+# ============================================================================
 
 def _run_trulens_groundedness(
     context: str,
@@ -320,13 +898,13 @@ def _run_trulens_groundedness(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     """
-    Run TruLens groundedness evaluation.
+    Run TruLens groundedness as a comparison metric.
 
-    TruLens is a comparison metric only.
-    It does NOT contribute to the official groundedness score.
+    TruLens does NOT contribute to the official groundedness score.
     """
 
     if not context or not context.strip():
+
         return {
             "status": "not_applicable",
             "reason": "No retrieved context available",
@@ -339,108 +917,165 @@ def _run_trulens_groundedness(
         execute_with_retry,
     )
 
-    trulens_timeout = _calculate_framework_timeout(
+    timeout = _calculate_framework_timeout(
         env_name="TRULENS_TIMEOUT",
-        default=45.0,
+        default=_DEFAULT_TRULENS_TIMEOUT,
         deadline=deadline,
     )
 
-    def framework_call() -> float:
-        """
-        Actual TruLens execution.
+    def _invoke_trulens() -> float:
 
-        This function executes INSIDE _shared_executor.
-        """
-        from trulens.providers.google import Google
+        try:
+            from google import genai
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Unable to import Google GenAI client: {exc}"
+            ) from exc
 
-        model_name = os.getenv(
-            "GEMINI_MODEL_NAME",
-            "gemini-3.5-flash",
+        try:
+            from trulens.providers.google import Google
+        except ImportError as exc:
+            raise RuntimeError(
+                f"Unable to import TruLens Google provider: {exc}"
+            ) from exc
+
+        api_key = os.getenv(
+            "GOOGLE_API_KEY"
         )
-
-        api_key = os.getenv("GOOGLE_API_KEY")
 
         if not api_key:
             raise ValueError(
                 "GOOGLE_API_KEY is not configured."
             )
 
-        provider = Google(
-            model_engine=model_name,
-            api_key=api_key,
+        model_name = os.getenv(
+            "GEMINI_MODEL_NAME"
         )
+
+        if not model_name:
+            raise ValueError(
+                "GEMINI_MODEL_NAME is not configured."
+            )
+
+        client = genai.Client(
+            api_key=api_key
+        )
+
+        provider = _create_compatible_trulens_provider(
+            client=client,
+            model_engine=model_name,
+        )
+
+        if not isinstance(
+            provider,
+            Google,
+        ):
+            raise RuntimeError(
+                "Failed to initialize compatible TruLens Google provider."
+            )
 
         with controlled_concurrency(
             "groundedness",
             "TruLens",
             conversation_id,
         ):
-            score = provider.groundedness_measure_with_cot_reasons(
-                source=context,
-                statement=response,
+
+            result = (
+                provider.groundedness_measure_with_cot_reasons(
+                    source=context,
+                    statement=response,
+                )
             )
 
-        if isinstance(score, tuple):
-            score = score[0]
+        if isinstance(
+            result,
+            tuple,
+        ):
+            score = result[0]
+        else:
+            score = result
 
-        score = float(score)
-
-        if not 0.0 <= score <= 1.0:
+        if score is None:
             raise ValueError(
-                f"TruLens returned out-of-range score: {score}"
+                "TruLens returned no score."
             )
 
-        return score
+        try:
 
-    def invoke_with_timeout() -> float:
-        """
-        Submit the framework call to the shared framework executor and
-        enforce the framework-specific timeout.
+            score_float = float(
+                score
+            )
 
-        Existing tests intentionally patch _shared_executor.submit().
-        """
+        except (
+            TypeError,
+            ValueError,
+        ) as exc:
+
+            raise ValueError(
+                "TruLens returned an invalid score: "
+                f"{score!r}"
+            ) from exc
+
+        if not 0.0 <= score_float <= 1.0:
+
+            raise ValueError(
+                "TruLens returned out-of-range score: "
+                f"{score_float}"
+            )
+
+        return score_float
+
+    def _submit_and_wait() -> float:
+
         future = _shared_executor.submit(
-            framework_call
+            _invoke_trulens
         )
 
         return float(
             future.result(
-                timeout=trulens_timeout
+                timeout=timeout
             )
         )
 
     try:
+
         score = execute_with_retry(
-            invoke_with_timeout,
+            _submit_and_wait,
             evaluator="groundedness",
             framework="TruLens",
             conversation_id=conversation_id,
-            max_retries=3,
-            initial_delay=2.0,
+            max_retries=_FRAMEWORK_MAX_RETRIES,
+            initial_delay=_FRAMEWORK_RETRY_DELAY,
             deadline=deadline,
         )
 
         return {
             "status": "success",
-            "score": float(score),
+            "score": float(
+                score
+            ),
         }
 
     except Exception as exc:
+
         logger.warning(
-            "TruLens groundedness evaluation failed for %s: %s",
+            "TruLens groundedness evaluation failed "
+            "for %s: %s",
             conversation_id,
             exc,
         )
 
         return {
             "status": "failed",
-            "error": str(exc),
+            "error": str(
+                exc
+            ),
         }
 
 
-# ---------------------------------------------------------------------------
-# DeepEval integration
-# ---------------------------------------------------------------------------
+# ============================================================================
+# DEEPEVAL
+# ============================================================================
 
 def _run_deepeval_faithfulness(
     user_query: str,
@@ -450,13 +1085,13 @@ def _run_deepeval_faithfulness(
     deadline: float | None = None,
 ) -> dict[str, Any]:
     """
-    Run DeepEval Faithfulness evaluation.
+    Run DeepEval faithfulness as a comparison metric.
 
-    DeepEval is a comparison metric only.
-    It does NOT contribute to the official groundedness score.
+    DeepEval does NOT contribute to the official groundedness score.
     """
 
     if not context or not context.strip():
+
         return {
             "status": "not_applicable",
             "reason": "No retrieved context available",
@@ -469,32 +1104,50 @@ def _run_deepeval_faithfulness(
         execute_with_retry,
     )
 
-    deepeval_timeout = _calculate_framework_timeout(
+    timeout = _calculate_framework_timeout(
         env_name="DEEPEVAL_TIMEOUT",
-        default=45.0,
+        default=_DEFAULT_DEEPEVAL_TIMEOUT,
         deadline=deadline,
     )
 
-    def framework_call() -> float:
-        """
-        Actual DeepEval execution.
+    def _invoke_deepeval() -> float:
 
-        This function executes INSIDE _shared_executor.
-        """
-        from deepeval.metrics import FaithfulnessMetric
-        from deepeval.models import GeminiModel
-        from deepeval.test_case import LLMTestCase
+        try:
 
-        model_name = os.getenv(
-            "GEMINI_MODEL_NAME",
-            "gemini-3.5-flash",
+            from deepeval.metrics import (
+                FaithfulnessMetric,
+            )
+
+            from deepeval.models import (
+                GeminiModel,
+            )
+
+            from deepeval.test_case import (
+                LLMTestCase,
+            )
+
+        except ImportError as exc:
+
+            raise RuntimeError(
+                f"Unable to import DeepEval components: {exc}"
+            ) from exc
+
+        api_key = os.getenv(
+            "GOOGLE_API_KEY"
         )
-
-        api_key = os.getenv("GOOGLE_API_KEY")
 
         if not api_key:
             raise ValueError(
                 "GOOGLE_API_KEY is not configured."
+            )
+
+        model_name = os.getenv(
+            "GEMINI_MODEL_NAME"
+        )
+
+        if not model_name:
+            raise ValueError(
+                "GEMINI_MODEL_NAME is not configured."
             )
 
         model = GeminiModel(
@@ -506,7 +1159,9 @@ def _run_deepeval_faithfulness(
         test_case = LLMTestCase(
             input=user_query,
             actual_output=response,
-            retrieval_context=[context],
+            retrieval_context=[
+                context
+            ],
         )
 
         metric = FaithfulnessMetric(
@@ -519,7 +1174,10 @@ def _run_deepeval_faithfulness(
             "DeepEval",
             conversation_id,
         ):
-            metric.measure(test_case)
+
+            metric.measure(
+                test_case
+            )
 
         score = metric.score
 
@@ -532,106 +1190,108 @@ def _run_deepeval_faithfulness(
             score,
             (int, float),
         ):
+
             raise ValueError(
                 "DeepEval returned invalid score type: "
                 f"{type(score).__name__}"
             )
 
-        score = float(score)
+        score_float = float(
+            score
+        )
 
-        if not 0.0 <= score <= 1.0:
+        if not 0.0 <= score_float <= 1.0:
+
             raise ValueError(
-                f"DeepEval returned out-of-range score: {score}"
+                "DeepEval returned out-of-range score: "
+                f"{score_float}"
             )
 
-        return score
+        return score_float
 
-    def invoke_with_timeout() -> float:
-        """
-        Submit DeepEval to _shared_executor and enforce timeout.
+    def _submit_and_wait() -> float:
 
-        Existing tests patch _shared_executor.submit().
-        """
         future = _shared_executor.submit(
-            framework_call
+            _invoke_deepeval
         )
 
         return float(
             future.result(
-                timeout=deepeval_timeout
+                timeout=timeout
             )
         )
 
     try:
+
         score = execute_with_retry(
-            invoke_with_timeout,
+            _submit_and_wait,
             evaluator="groundedness",
             framework="DeepEval",
             conversation_id=conversation_id,
-            max_retries=3,
-            initial_delay=2.0,
+            max_retries=_FRAMEWORK_MAX_RETRIES,
+            initial_delay=_FRAMEWORK_RETRY_DELAY,
             deadline=deadline,
         )
 
         return {
             "status": "success",
-            "score": float(score),
+            "score": float(
+                score
+            ),
         }
 
     except Exception as exc:
+
         logger.warning(
-            "DeepEval faithfulness evaluation failed for %s: %s",
+            "DeepEval faithfulness evaluation failed "
+            "for %s: %s",
             conversation_id,
             exc,
         )
 
         return {
             "status": "failed",
-            "error": str(exc),
+            "error": str(
+                exc
+            ),
         }
 
 
-# ---------------------------------------------------------------------------
-# Groundedness Evaluator
-# ---------------------------------------------------------------------------
+# ============================================================================
+# GROUNDEDNESS EVALUATOR
+# ============================================================================
 
 class GroundednessEvaluator(BaseEvaluator):
     """
     Groundedness / hallucination evaluator.
-
-    Context-backed:
-        - Custom LLM judge
-        - TruLens comparison
-        - DeepEval comparison
-
-    Context-free:
-        - Custom LLM judge
-        - TruLens not applicable
-        - DeepEval not applicable
     """
 
     name: str = "groundedness"
 
     def __init__(self) -> None:
+
         self._judge = LLMJudge()
 
         logger.info(
             "GroundednessEvaluator initialized."
         )
 
-    # ------------------------------------------------------------------
-    # Main evaluation
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # MAIN ENTRY POINT
+    # ========================================================================
 
     def evaluate(
         self,
         eval_input: EvaluationInput,
     ) -> EvaluationResult:
+
         try:
+
             if (
                 eval_input.conversation_type
                 == ConversationType.CONTEXT_BACKED
             ):
+
                 return self._evaluate_context_backed(
                     eval_input
                 )
@@ -641,22 +1301,26 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         except Exception as exc:
+
             logger.error(
                 "GroundednessEvaluator failed for %s: %s",
                 eval_input.conversation_id,
                 exc,
+                exc_info=True,
             )
 
-            error_status = classify_exception(
+            status = classify_exception(
                 exc
             )
 
             return EvaluationResult(
                 evaluator_name=self.name,
-                conversation_id=eval_input.conversation_id,
+                conversation_id=(
+                    eval_input.conversation_id
+                ),
                 score=None,
                 max_score=20.0,
-                status=error_status,
+                status=status,
                 sub_scores={},
                 feedback=(
                     "Groundedness evaluation failed "
@@ -665,16 +1329,18 @@ class GroundednessEvaluator(BaseEvaluator):
                 flagged=True,
             )
 
-    # ------------------------------------------------------------------
-    # Context-backed
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # CONTEXT-BACKED
+    # ========================================================================
 
     def _evaluate_context_backed(
         self,
         eval_input: EvaluationInput,
     ) -> EvaluationResult:
+
         logger.debug(
-            "Evaluating groundedness (context-backed) for '%s'",
+            "Evaluating groundedness (context-backed) "
+            "for '%s'",
             eval_input.conversation_id,
         )
 
@@ -683,16 +1349,20 @@ class GroundednessEvaluator(BaseEvaluator):
             or ""
         )
 
-        response = eval_input.dave_response
-        deadline = eval_input.deadline
+        response = (
+            eval_input.dave_response
+        )
 
-        # Outer orchestration futures use the separate orchestration pool.
-        future_custom = _orchestration_executor.submit(
+        deadline = (
+            eval_input.deadline
+        )
+
+        future_custom = _shared_executor.submit(
             self._run_custom_context_backed_judge,
             eval_input,
         )
 
-        future_trulens = _orchestration_executor.submit(
+        future_trulens = _shared_executor.submit(
             _run_trulens_groundedness,
             context,
             response,
@@ -700,7 +1370,7 @@ class GroundednessEvaluator(BaseEvaluator):
             deadline,
         )
 
-        future_deepeval = _orchestration_executor.submit(
+        future_deepeval = _shared_executor.submit(
             _run_deepeval_faithfulness,
             eval_input.user_query,
             response,
@@ -717,93 +1387,106 @@ class GroundednessEvaluator(BaseEvaluator):
 
         custom_exc: Exception | None = None
 
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
         # Custom judge
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
 
         try:
-            remaining = self._remaining_timeout(
-                deadline
-            )
 
             parsed_json, raw_text = (
                 future_custom.result(
-                    timeout=remaining
+                    timeout=_remaining_deadline(
+                        deadline
+                    )
                 )
             )
 
         except Exception as exc:
+
             custom_exc = exc
 
             logger.error(
-                "Groundedness custom judge failed for %s: %s",
+                "Groundedness custom judge failed "
+                "for %s: %s",
                 eval_input.conversation_id,
                 exc,
             )
 
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
         # TruLens
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
 
         try:
-            remaining = self._remaining_timeout(
-                deadline
-            )
 
-            trulens_res = future_trulens.result(
-                timeout=remaining
+            trulens_res = (
+                future_trulens.result(
+                    timeout=_remaining_deadline(
+                        deadline
+                    )
+                )
             )
 
         except Exception as exc:
+
             logger.error(
-                "Groundedness TruLens failed for %s: %s",
+                "Groundedness TruLens failed "
+                "for %s: %s",
                 eval_input.conversation_id,
                 exc,
             )
 
             trulens_res = {
                 "status": "failed",
-                "error": str(exc),
+                "error": str(
+                    exc
+                ),
             }
 
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
         # DeepEval
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
 
         try:
-            remaining = self._remaining_timeout(
-                deadline
-            )
 
-            deepeval_res = future_deepeval.result(
-                timeout=remaining
+            deepeval_res = (
+                future_deepeval.result(
+                    timeout=_remaining_deadline(
+                        deadline
+                    )
+                )
             )
 
         except Exception as exc:
+
             logger.error(
-                "Groundedness DeepEval failed for %s: %s",
+                "Groundedness DeepEval failed "
+                "for %s: %s",
                 eval_input.conversation_id,
                 exc,
             )
 
             deepeval_res = {
                 "status": "failed",
-                "error": str(exc),
+                "error": str(
+                    exc
+                ),
             }
 
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
         # Custom judge failure
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
 
         if not parsed_json:
-            error_status = "failed"
+
+            status = "failed"
 
             feedback = (
                 "Groundedness custom judge call failed."
             )
 
             if custom_exc is not None:
-                error_status = classify_exception(
+
+                status = classify_exception(
                     custom_exc
                 )
 
@@ -814,33 +1497,77 @@ class GroundednessEvaluator(BaseEvaluator):
 
             return EvaluationResult(
                 evaluator_name=self.name,
-                conversation_id=eval_input.conversation_id,
+                conversation_id=(
+                    eval_input.conversation_id
+                ),
                 score=None,
-                max_score=_MAX_SCORE_CONTEXT_BACKED,
-                status=error_status,
+                max_score=(
+                    _MAX_SCORE_CONTEXT_BACKED
+                ),
+                status=status,
                 sub_scores={},
                 feedback=feedback,
                 flagged=True,
             )
 
-        # --------------------------------------------------------------
-        # Extract custom scores
-        # --------------------------------------------------------------
+        # --------------------------------------------------------------------
+        # Extract scores
+        # --------------------------------------------------------------------
 
-        consistency_raw = self._extract_score(
-            parsed_json,
-            "internal_consistency",
-        )
+        try:
 
-        overconfidence_raw = self._extract_score(
-            parsed_json,
-            "overconfidence",
-        )
+            consistency_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "internal_consistency",
+                )
+            )
 
-        hallucination_raw = self._extract_score(
-            parsed_json,
-            "hallucination_risk",
-        )
+            overconfidence_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "overconfidence",
+                )
+            )
+
+            hallucination_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "hallucination_risk",
+                )
+            )
+
+        except Exception as exc:
+
+            logger.error(
+                "Invalid groundedness judge output "
+                "for %s: %s",
+                eval_input.conversation_id,
+                exc,
+                exc_info=True,
+            )
+
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=(
+                    eval_input.conversation_id
+                ),
+                score=None,
+                max_score=(
+                    _MAX_SCORE_CONTEXT_BACKED
+                ),
+                status="failed",
+                sub_scores={},
+                feedback=(
+                    "Groundedness judge returned invalid "
+                    f"structured output: {exc}"
+                ),
+                flagged=True,
+            )
+
+        # --------------------------------------------------------------------
+        # Official score
+        # --------------------------------------------------------------------
 
         consistency_score = (
             consistency_raw / 5.0
@@ -869,10 +1596,6 @@ class GroundednessEvaluator(BaseEvaluator):
             ),
         }
 
-        # --------------------------------------------------------------
-        # External framework comparison results
-        # --------------------------------------------------------------
-
         self._add_trulens_result(
             sub_scores,
             trulens_res,
@@ -883,14 +1606,18 @@ class GroundednessEvaluator(BaseEvaluator):
             deepeval_res,
         )
 
-        # --------------------------------------------------------------
-        # Official score
-        # --------------------------------------------------------------
-
         total_score = round(
             consistency_score
             + overconfidence_score
             + hallucination_score,
+            2,
+        )
+
+        percentage = round(
+            (
+                total_score
+                / _MAX_SCORE_CONTEXT_BACKED
+            ) * 100.0,
             2,
         )
 
@@ -903,53 +1630,60 @@ class GroundednessEvaluator(BaseEvaluator):
 
         flagged = (
             total_score
-            < (_MAX_SCORE_CONTEXT_BACKED * 0.5)
+            < (
+                _MAX_SCORE_CONTEXT_BACKED
+                * 0.5
+            )
         )
 
         return EvaluationResult(
             evaluator_name=self.name,
-            conversation_id=eval_input.conversation_id,
-            score=total_score,
-            max_score=_MAX_SCORE_CONTEXT_BACKED,
-            percentage=round(
-                (
-                    total_score
-                    / _MAX_SCORE_CONTEXT_BACKED
-                )
-                * 100.0,
-                2,
+            conversation_id=(
+                eval_input.conversation_id
             ),
+            score=total_score,
+            max_score=(
+                _MAX_SCORE_CONTEXT_BACKED
+            ),
+            percentage=percentage,
             sub_scores=sub_scores,
             feedback=feedback,
             flagged=flagged,
         )
 
-    # ------------------------------------------------------------------
-    # Custom context-backed judge
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # CUSTOM CONTEXT-BACKED JUDGE
+    # ========================================================================
 
     def _run_custom_context_backed_judge(
         self,
         eval_input: EvaluationInput,
     ) -> tuple[dict[str, Any], str]:
 
-        chat_section = ""
+        chat_history_section = ""
 
         if eval_input.chat_history:
-            chat_section = (
+
+            chat_history_section = (
                 "## Conversation History\n"
                 f"{eval_input.chat_history}"
             )
 
         user_prompt = (
             _USER_PROMPT_CONTEXT_BACKED.format(
-                user_query=eval_input.user_query,
-                dave_response=eval_input.dave_response,
+                user_query=(
+                    eval_input.user_query
+                ),
+                dave_response=(
+                    eval_input.dave_response
+                ),
                 retrieved_context=(
                     eval_input.retrieved_context
                     or ""
                 ),
-                chat_history_section=chat_section,
+                chat_history_section=(
+                    chat_history_section
+                ),
             )
         )
 
@@ -961,12 +1695,14 @@ class GroundednessEvaluator(BaseEvaluator):
                 eval_input.conversation_id
             ),
             response_schema=GroundednessSchema,
-            deadline=eval_input.deadline,
+            deadline=(
+                eval_input.deadline
+            ),
         )
 
-    # ------------------------------------------------------------------
-    # Context-backed feedback
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # CONTEXT-BACKED FEEDBACK
+    # ========================================================================
 
     @staticmethod
     def _build_context_backed_feedback(
@@ -976,7 +1712,7 @@ class GroundednessEvaluator(BaseEvaluator):
 
         parts: list[str] = []
 
-        for metric_key, label in [
+        for metric_key, label in (
             (
                 "internal_consistency",
                 "Internal Consistency",
@@ -989,30 +1725,44 @@ class GroundednessEvaluator(BaseEvaluator):
                 "hallucination_risk",
                 "Hallucination Risk",
             ),
-        ]:
+        ):
+
             entry = parsed.get(
                 metric_key,
                 {},
             )
 
             if (
-                isinstance(entry, dict)
-                and entry.get("reasoning")
+                isinstance(
+                    entry,
+                    dict,
+                )
+                and entry.get(
+                    "reasoning"
+                )
             ):
+
                 parts.append(
                     f"{label} "
                     f"({entry.get('score', '?')}/5): "
                     f"{entry['reasoning']}"
                 )
 
-        overall = parsed.get(
-            "overall_reasoning",
-            "",
+        overall_reasoning = (
+            parsed.get(
+                "overall_reasoning"
+            )
+            or parsed.get(
+                "explanation"
+            )
+            or ""
         )
 
-        if overall:
+        if overall_reasoning:
+
             parts.append(
-                f"Overall Assessment: {overall}"
+                "Overall Assessment: "
+                f"{overall_reasoning}"
             )
 
         parts.append(
@@ -1025,6 +1775,10 @@ class GroundednessEvaluator(BaseEvaluator):
             f"{sub_scores.get('hallucination_risk', 0)}/8.0"
         )
 
+        # --------------------------------------------------------------------
+        # TruLens
+        # --------------------------------------------------------------------
+
         trulens_status = sub_scores.get(
             "trulens_status",
             "unknown",
@@ -1034,6 +1788,7 @@ class GroundednessEvaluator(BaseEvaluator):
             trulens_status == "success"
             and "trulens_score" in sub_scores
         ):
+
             parts.append(
                 "TruLens Groundedness "
                 "(comparison): "
@@ -1041,6 +1796,7 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         elif trulens_status == "failed":
+
             parts.append(
                 "TruLens Groundedness "
                 "(comparison): FAILED. "
@@ -1049,12 +1805,17 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         else:
+
             parts.append(
                 "TruLens Groundedness "
                 "(comparison): NOT APPLICABLE. "
                 f"Reason: "
                 f"{sub_scores.get('trulens_reason', '')}"
             )
+
+        # --------------------------------------------------------------------
+        # DeepEval
+        # --------------------------------------------------------------------
 
         deepeval_status = sub_scores.get(
             "deepeval_status",
@@ -1065,6 +1826,7 @@ class GroundednessEvaluator(BaseEvaluator):
             deepeval_status == "success"
             and "deepeval_score" in sub_scores
         ):
+
             parts.append(
                 "DeepEval Faithfulness "
                 "(comparison): "
@@ -1072,6 +1834,7 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         elif deepeval_status == "failed":
+
             parts.append(
                 "DeepEval Faithfulness "
                 "(comparison): FAILED. "
@@ -1080,6 +1843,7 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         else:
+
             parts.append(
                 "DeepEval Faithfulness "
                 "(comparison): NOT APPLICABLE. "
@@ -1093,9 +1857,9 @@ class GroundednessEvaluator(BaseEvaluator):
             else "No feedback generated."
         )
 
-    # ------------------------------------------------------------------
-    # Context-free evaluation
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # CONTEXT-FREE
+    # ========================================================================
 
     def _evaluate_context_free(
         self,
@@ -1108,23 +1872,30 @@ class GroundednessEvaluator(BaseEvaluator):
             eval_input.conversation_id,
         )
 
-        chat_section = ""
+        chat_history_section = ""
 
         if eval_input.chat_history:
-            chat_section = (
+
+            chat_history_section = (
                 "## Conversation History\n"
                 f"{eval_input.chat_history}"
             )
 
         user_prompt = (
             _USER_PROMPT_CONTEXT_FREE.format(
-                user_query=eval_input.user_query,
-                dave_response=eval_input.dave_response,
-                chat_history_section=chat_section,
+                user_query=(
+                    eval_input.user_query
+                ),
+                dave_response=(
+                    eval_input.dave_response
+                ),
+                chat_history_section=(
+                    chat_history_section
+                ),
             )
         )
 
-        parsed_json, raw_text = (
+        parsed_json, _raw_text = (
             self._judge.call_with_json(
                 _SYSTEM_PROMPT_CONTEXT_FREE,
                 user_prompt,
@@ -1133,16 +1904,23 @@ class GroundednessEvaluator(BaseEvaluator):
                     eval_input.conversation_id
                 ),
                 response_schema=GroundednessSchema,
-                deadline=eval_input.deadline,
+                deadline=(
+                    eval_input.deadline
+                ),
             )
         )
 
         if not parsed_json:
+
             return EvaluationResult(
                 evaluator_name=self.name,
-                conversation_id=eval_input.conversation_id,
+                conversation_id=(
+                    eval_input.conversation_id
+                ),
                 score=None,
-                max_score=_MAX_SCORE_CONTEXT_FREE,
+                max_score=(
+                    _MAX_SCORE_CONTEXT_FREE
+                ),
                 status="failed",
                 sub_scores={},
                 feedback=(
@@ -1152,20 +1930,56 @@ class GroundednessEvaluator(BaseEvaluator):
                 flagged=True,
             )
 
-        consistency_raw = self._extract_score(
-            parsed_json,
-            "internal_consistency",
-        )
+        try:
 
-        overconfidence_raw = self._extract_score(
-            parsed_json,
-            "overconfidence",
-        )
+            consistency_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "internal_consistency",
+                )
+            )
 
-        hallucination_raw = self._extract_score(
-            parsed_json,
-            "hallucination_risk",
-        )
+            overconfidence_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "overconfidence",
+                )
+            )
+
+            hallucination_raw = (
+                self._extract_score(
+                    parsed_json,
+                    "hallucination_risk",
+                )
+            )
+
+        except Exception as exc:
+
+            logger.error(
+                "Invalid context-free groundedness output "
+                "for %s: %s",
+                eval_input.conversation_id,
+                exc,
+                exc_info=True,
+            )
+
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=(
+                    eval_input.conversation_id
+                ),
+                score=None,
+                max_score=(
+                    _MAX_SCORE_CONTEXT_FREE
+                ),
+                status="failed",
+                sub_scores={},
+                feedback=(
+                    "Groundedness judge returned invalid "
+                    f"structured output: {exc}"
+                ),
+                flagged=True,
+            )
 
         consistency_score = (
             consistency_raw / 5.0
@@ -1178,6 +1992,13 @@ class GroundednessEvaluator(BaseEvaluator):
         hallucination_score = (
             hallucination_raw / 5.0
         ) * 8.0
+
+        total_score = round(
+            consistency_score
+            + overconfidence_score
+            + hallucination_score,
+            2,
+        )
 
         sub_scores: dict[str, Any] = {
             "internal_consistency": round(
@@ -1202,10 +2023,11 @@ class GroundednessEvaluator(BaseEvaluator):
             ),
         }
 
-        total_score = round(
-            consistency_score
-            + overconfidence_score
-            + hallucination_score,
+        percentage = round(
+            (
+                total_score
+                / _MAX_SCORE_CONTEXT_FREE
+            ) * 100.0,
             2,
         )
 
@@ -1218,30 +2040,30 @@ class GroundednessEvaluator(BaseEvaluator):
 
         flagged = (
             total_score
-            < (_MAX_SCORE_CONTEXT_FREE * 0.5)
+            < (
+                _MAX_SCORE_CONTEXT_FREE
+                * 0.5
+            )
         )
 
         return EvaluationResult(
             evaluator_name=self.name,
-            conversation_id=eval_input.conversation_id,
-            score=total_score,
-            max_score=_MAX_SCORE_CONTEXT_FREE,
-            percentage=round(
-                (
-                    total_score
-                    / _MAX_SCORE_CONTEXT_FREE
-                )
-                * 100.0,
-                2,
+            conversation_id=(
+                eval_input.conversation_id
             ),
+            score=total_score,
+            max_score=(
+                _MAX_SCORE_CONTEXT_FREE
+            ),
+            percentage=percentage,
             sub_scores=sub_scores,
             feedback=feedback,
             flagged=flagged,
         )
 
-    # ------------------------------------------------------------------
-    # Context-free feedback
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # CONTEXT-FREE FEEDBACK
+    # ========================================================================
 
     @staticmethod
     def _build_context_free_feedback(
@@ -1251,7 +2073,7 @@ class GroundednessEvaluator(BaseEvaluator):
 
         parts: list[str] = []
 
-        for metric_key, label in [
+        for metric_key, label in (
             (
                 "internal_consistency",
                 "Internal Consistency",
@@ -1264,30 +2086,44 @@ class GroundednessEvaluator(BaseEvaluator):
                 "hallucination_risk",
                 "Hallucination Risk",
             ),
-        ]:
+        ):
+
             entry = parsed.get(
                 metric_key,
                 {},
             )
 
             if (
-                isinstance(entry, dict)
-                and entry.get("reasoning")
+                isinstance(
+                    entry,
+                    dict,
+                )
+                and entry.get(
+                    "reasoning"
+                )
             ):
+
                 parts.append(
                     f"{label} "
                     f"({entry.get('score', '?')}/5): "
                     f"{entry['reasoning']}"
                 )
 
-        overall = parsed.get(
-            "overall_reasoning",
-            "",
+        overall_reasoning = (
+            parsed.get(
+                "overall_reasoning"
+            )
+            or parsed.get(
+                "explanation"
+            )
+            or ""
         )
 
-        if overall:
+        if overall_reasoning:
+
             parts.append(
-                f"Overall: {overall}"
+                "Overall Assessment: "
+                f"{overall_reasoning}"
             )
 
         parts.append(
@@ -1318,9 +2154,9 @@ class GroundednessEvaluator(BaseEvaluator):
             else "No feedback generated."
         )
 
-    # ------------------------------------------------------------------
-    # External framework result helpers
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # TRULENS RESULT
+    # ========================================================================
 
     @staticmethod
     def _add_trulens_result(
@@ -1333,6 +2169,7 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         if status == "success":
+
             score = result.get(
                 "score"
             )
@@ -1341,6 +2178,7 @@ class GroundednessEvaluator(BaseEvaluator):
                 score,
                 (int, float),
             ):
+
                 sub_scores[
                     "trulens_status"
                 ] = "success"
@@ -1348,11 +2186,14 @@ class GroundednessEvaluator(BaseEvaluator):
                 sub_scores[
                     "trulens_score"
                 ] = round(
-                    float(score),
+                    float(
+                        score
+                    ),
                     4,
                 )
 
             else:
+
                 sub_scores[
                     "trulens_status"
                 ] = "failed"
@@ -1365,6 +2206,7 @@ class GroundednessEvaluator(BaseEvaluator):
                 )
 
         elif status == "failed":
+
             sub_scores[
                 "trulens_status"
             ] = "failed"
@@ -1377,6 +2219,7 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         else:
+
             sub_scores[
                 "trulens_status"
             ] = "not_applicable"
@@ -1387,6 +2230,10 @@ class GroundednessEvaluator(BaseEvaluator):
                 "reason",
                 "No retrieved context available",
             )
+
+    # ========================================================================
+    # DEEPEVAL RESULT
+    # ========================================================================
 
     @staticmethod
     def _add_deepeval_result(
@@ -1399,6 +2246,7 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         if status == "success":
+
             score = result.get(
                 "score"
             )
@@ -1407,6 +2255,7 @@ class GroundednessEvaluator(BaseEvaluator):
                 score,
                 (int, float),
             ):
+
                 sub_scores[
                     "deepeval_status"
                 ] = "success"
@@ -1414,11 +2263,14 @@ class GroundednessEvaluator(BaseEvaluator):
                 sub_scores[
                     "deepeval_score"
                 ] = round(
-                    float(score),
+                    float(
+                        score
+                    ),
                     4,
                 )
 
             else:
+
                 sub_scores[
                     "deepeval_status"
                 ] = "failed"
@@ -1431,6 +2283,7 @@ class GroundednessEvaluator(BaseEvaluator):
                 )
 
         elif status == "failed":
+
             sub_scores[
                 "deepeval_status"
             ] = "failed"
@@ -1443,6 +2296,7 @@ class GroundednessEvaluator(BaseEvaluator):
             )
 
         else:
+
             sub_scores[
                 "deepeval_status"
             ] = "not_applicable"
@@ -1454,26 +2308,9 @@ class GroundednessEvaluator(BaseEvaluator):
                 "No retrieved context available",
             )
 
-    # ------------------------------------------------------------------
-    # Remaining timeout
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _remaining_timeout(
-        deadline: float | None,
-    ) -> float | None:
-
-        if deadline is None:
-            return None
-
-        return max(
-            _MIN_FRAMEWORK_TIMEOUT,
-            deadline - time.time(),
-        )
-
-    # ------------------------------------------------------------------
-    # Score extraction
-    # ------------------------------------------------------------------
+    # ========================================================================
+    # SCORE EXTRACTION
+    # ========================================================================
 
     @staticmethod
     def _extract_score(
@@ -1486,6 +2323,7 @@ class GroundednessEvaluator(BaseEvaluator):
         )
 
         if entry is None:
+
             raise ValueError(
                 f"Missing key '{key}' "
                 "in LLM response."
@@ -1495,11 +2333,13 @@ class GroundednessEvaluator(BaseEvaluator):
             entry,
             dict,
         ):
+
             raw = entry.get(
                 "score"
             )
 
             if raw is None:
+
                 raise ValueError(
                     f"Missing 'score' field "
                     f"inside key '{key}' "
@@ -1507,9 +2347,11 @@ class GroundednessEvaluator(BaseEvaluator):
                 )
 
         else:
+
             raw = entry
 
         try:
+
             score = int(
                 raw
             )
@@ -1518,12 +2360,14 @@ class GroundednessEvaluator(BaseEvaluator):
             TypeError,
             ValueError,
         ) as exc:
+
             raise ValueError(
                 f"Non-integer score for "
                 f"'{key}': {raw}"
             ) from exc
 
         if not 1 <= score <= 5:
+
             raise ValueError(
                 f"Out-of-range score for "
                 f"'{key}': {score}"
