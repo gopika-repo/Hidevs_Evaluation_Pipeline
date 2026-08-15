@@ -61,8 +61,35 @@ This avoids the incompatible typed-schema conversion layer.
 No mock data is used.
 No API key is hardcoded.
 No evaluation score is hardcoded.
-The Gemini model is read from GEMINI_MODEL_NAME.
+The Gemini model is read from GEMINI_MODEL_NAME (falling back to the same
+default used by utils/llm_client.py if the environment variable is not
+explicitly set — this keeps model-name resolution CONSISTENT across the
+entire pipeline instead of this file being the only place that hard-fails
+on a missing env var).
 The API key is read from GOOGLE_API_KEY.
+
+PRODUCTION FIX APPLIED
+-----------------------
+Previously, _invoke_trulens() and _invoke_deepeval() each did:
+
+    model_name = os.getenv("GEMINI_MODEL_NAME")
+    if not model_name:
+        raise ValueError("GEMINI_MODEL_NAME is not configured.")
+
+This was INCONSISTENT with utils/llm_client.py, which already defines a
+safe default:
+
+    _gemini_model = os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite")
+
+Because this file had no fallback, TruLens/DeepEval calls would hard-fail
+in any environment (e.g. Render) where GEMINI_MODEL_NAME was not
+explicitly set in that environment's variables — even though every other
+evaluator in the pipeline worked fine there via the shared default. Both
+call sites below now use the same fallback default as llm_client.py, so
+model-name resolution is uniform across the whole codebase. Explicitly
+setting GEMINI_MODEL_NAME in production is still recommended (see
+deployment notes), but a missing env var no longer causes a hard failure
+here specifically.
 """
 
 from __future__ import annotations
@@ -124,6 +151,11 @@ _DEFAULT_DEEPEVAL_TIMEOUT = 45.0
 
 _FRAMEWORK_MAX_RETRIES = 3
 _FRAMEWORK_RETRY_DELAY = 2.0
+
+# Must stay identical to the default in utils/llm_client.py so that model
+# resolution behaves the same way everywhere in the pipeline, regardless
+# of which evaluator or framework is making the call.
+_DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 # ============================================================================
@@ -948,14 +980,16 @@ def _run_trulens_groundedness(
                 "GOOGLE_API_KEY is not configured."
             )
 
+        # FIX: fall back to the same default model used everywhere else
+        # in the pipeline (utils/llm_client.py) instead of hard-failing
+        # when GEMINI_MODEL_NAME is not explicitly set in this
+        # environment. This was the root cause of TruLens failing on
+        # Render specifically, while every other evaluator worked fine
+        # via this same fallback pattern.
         model_name = os.getenv(
-            "GEMINI_MODEL_NAME"
+            "GEMINI_MODEL_NAME",
+            _DEFAULT_GEMINI_MODEL,
         )
-
-        if not model_name:
-            raise ValueError(
-                "GEMINI_MODEL_NAME is not configured."
-            )
 
         client = genai.Client(
             api_key=api_key
@@ -1141,14 +1175,13 @@ def _run_deepeval_faithfulness(
                 "GOOGLE_API_KEY is not configured."
             )
 
+        # FIX: same fallback default as _invoke_trulens() above and as
+        # utils/llm_client.py — see module docstring "PRODUCTION FIX
+        # APPLIED" section for the full explanation.
         model_name = os.getenv(
-            "GEMINI_MODEL_NAME"
+            "GEMINI_MODEL_NAME",
+            _DEFAULT_GEMINI_MODEL,
         )
-
-        if not model_name:
-            raise ValueError(
-                "GEMINI_MODEL_NAME is not configured."
-            )
 
         model = GeminiModel(
             model=model_name,

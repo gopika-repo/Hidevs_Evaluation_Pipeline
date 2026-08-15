@@ -3,11 +3,28 @@ Memory & Context Continuity Evaluator — Phase 1
 
 Evaluates the assistant's ability to recall and maintain consistency with
 information explicitly established in previous conversation turns.
+
+FIX APPLIED (production hardening):
+------------------------------------
+Previously, "is_applicable" was decided entirely by an LLM judgment call on
+EVERY input, including trivial cases (empty history, or a single user-only
+line with no prior assistant turn). Because this is a live LLM call, the
+same exact input could non-deterministically return applicable=True on one
+run and applicable=False on the next — confirmed via repeated testing with
+identical single-line chat_history input.
+
+A deterministic pre-check has been added: if the chat_history does not
+contain at least one prior ASSISTANT/Dave turn (i.e. it's empty, or only
+contains user message(s) with no completed prior exchange), applicability
+is now decided by code, not by asking the LLM to guess. The LLM is only
+invoked for genuinely ambiguous cases where at least one full prior
+exchange exists.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from evaluation_pipeline.data.models import (
@@ -69,6 +86,46 @@ Return ONLY valid JSON matching this schema:
 }
 """
 
+# ============================================================================
+# DETERMINISTIC APPLICABILITY PRE-CHECK
+# ============================================================================
+
+# Matches lines that begin with a known assistant/AI role label, e.g.
+# "Dave:", "Assistant:", "AI:", "Bot:" — case-insensitive, optional leading
+# whitespace. This intentionally covers common naming conventions used
+# across this project's chat_history strings without hardcoding only one
+# exact label.
+_ASSISTANT_TURN_PATTERN = re.compile(
+    r"^\s*(dave|assistant|ai|bot|system)\s*:",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _has_prior_assistant_turn(chat_history: str) -> bool:
+    """
+    Deterministically check whether chat_history contains at least one
+    completed prior turn from the assistant (Dave), as opposed to only
+    containing user message(s) with no prior response to be consistent
+    with.
+
+    This does not use an LLM call — it is a plain, reproducible text
+    check, intentionally kept simple and conservative:
+
+        - Empty / whitespace-only history -> False (handled earlier too)
+        - Only user line(s), no assistant line -> False
+        - At least one recognizable assistant/Dave line -> True
+
+    Returning False here means memory/continuity is NOT applicable,
+    without invoking the LLM at all, ensuring a deterministic result
+    for the two most common trivial cases.
+    """
+
+    if not chat_history or not chat_history.strip():
+        return False
+
+    return bool(_ASSISTANT_TURN_PATTERN.search(chat_history))
+
+
 class MemoryEvaluator(BaseEvaluator):
     """
     Evaluator for Memory & Context Continuity.
@@ -85,7 +142,9 @@ class MemoryEvaluator(BaseEvaluator):
     def evaluate(self, eval_input: EvaluationInput) -> EvaluationResult:
         logger.debug("Evaluating memory & context continuity for '%s'", eval_input.conversation_id)
 
-        # 1. No chat history pre-check
+        # --------------------------------------------------------------
+        # 1. No chat history at all -> deterministic not_applicable.
+        # --------------------------------------------------------------
         if not eval_input.chat_history or not eval_input.chat_history.strip():
             logger.info("No chat history for '%s'. Skipping memory evaluation.", eval_input.conversation_id)
             return EvaluationResult(
@@ -105,7 +164,48 @@ class MemoryEvaluator(BaseEvaluator):
                 flagged=False
             )
 
-        # 2. Call LLM Judge
+        # --------------------------------------------------------------
+        # 1b. Chat history exists but contains NO prior assistant/Dave
+        #     turn (e.g. a single trailing user-only line). This is a
+        #     deterministic, code-level decision — NOT an LLM guess —
+        #     specifically to eliminate the non-deterministic
+        #     applicable/not_applicable flip observed on identical
+        #     repeated inputs.
+        # --------------------------------------------------------------
+        if not _has_prior_assistant_turn(eval_input.chat_history):
+            logger.info(
+                "Chat history for '%s' contains no completed prior "
+                "assistant turn. Deterministically marking memory "
+                "evaluation as not_applicable (no LLM call made).",
+                eval_input.conversation_id,
+            )
+            return EvaluationResult(
+                evaluator_name=self.name,
+                conversation_id=eval_input.conversation_id,
+                score=None,
+                max_score=20.0,
+                applicable=False,
+                status="not_applicable",
+                percentage=None,
+                sub_scores={
+                    "context_continuity": None,
+                    "information_retention": None,
+                    "consistency_across_turns": None
+                },
+                feedback=(
+                    "Chat history does not contain a completed prior "
+                    "assistant turn (only user message(s) present), so "
+                    "there is no established context for the assistant "
+                    "to remain consistent with. Determined "
+                    "deterministically without an LLM call."
+                ),
+                flagged=False
+            )
+
+        # --------------------------------------------------------------
+        # 2. Genuinely ambiguous case: at least one full prior exchange
+        #    exists — defer to the LLM judge for applicability + scoring.
+        # --------------------------------------------------------------
         try:
             user_prompt = (
                 f"## Conversation History (Prior Turns)\n{eval_input.chat_history}\n\n"
